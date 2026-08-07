@@ -58,16 +58,19 @@ def run_path(value: str) -> Path:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Plot per-dialect scores and token efficiency for two runs."
+        description="Plot per-dialect scores and token efficiency for two or more runs."
     )
     parser.add_argument(
         "runs",
         metavar="RUN",
-        nargs=2,
+        nargs="+",
         type=run_path,
         help="run directory containing a waves/ subdirectory",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if len(args.runs) < 2:
+        parser.error("at least two run directories are required")
+    return args
 
 
 def load_run_results(root: Path) -> dict[tuple[str, int], tuple[Path, dict]]:
@@ -135,16 +138,15 @@ def load_point(path: Path, result: dict) -> tuple[float, float]:
 
 def main() -> None:
     args = parse_args()
-    runs = {f"Run {index}": root for index, root in enumerate(args.runs, start=1)}
-    run_results = {name: load_run_results(root) for name, root in runs.items()}
+    run_results = [load_run_results(root) for root in args.runs]
     models = {
         result.get("model") or "unknown"
-        for results in run_results.values()
+        for results in run_results
         for _, result in results.values()
     }
     harnesses = {
         result.get("harness") or "unknown"
-        for results in run_results.values()
+        for results in run_results
         for _, result in results.values()
     }
     if len(models) != 1 or len(harnesses) != 1:
@@ -161,47 +163,50 @@ def main() -> None:
     )
     fig, axes = plt.subplots(6, 2, figsize=(20, 27), constrained_layout=True)
     x = np.arange(len(DIALECTS))
+    run_offsets = np.linspace(-0.12, 0.12, len(run_results))
 
     for row, (problem_id, problem) in enumerate(PROBLEMS):
-        scores = {}
-        tokens = {}
-        efficiency = {}
-        for run_name, results in run_results.items():
-            points = [
+        points_by_run = [
+            [
                 load_point(*results[(problem_id, index)])
                 for index in range(len(DIALECTS))
             ]
-            scores[run_name] = np.array([point[0] for point in points])
-            tokens[run_name] = np.array([point[1] for point in points])
-            efficiency[run_name] = scores[run_name] / tokens[run_name]
+            for results in run_results
+        ]
+        scores = np.array(
+            [[point[0] for point in points] for points in points_by_run]
+        )
+        tokens = np.array(
+            [[point[1] for point in points] for points in points_by_run]
+        )
+        efficiency = scores / tokens
+        mean_scores = scores.mean(axis=0)
+        combined_efficiency = scores.sum(axis=0) / tokens.sum(axis=0)
 
-        scores["Average"] = (scores["Run 1"] + scores["Run 2"]) / 2
-        # Combined efficiency: total score divided by total tokens. This equals
-        # average score divided by average token usage.
-        efficiency["Average"] = (
-            scores["Run 1"] + scores["Run 2"]
-        ) / (tokens["Run 1"] + tokens["Run 2"])
-
-        for col, (metric, values, ylabel) in enumerate(
+        for col, (metric, observations, centers, ylabel) in enumerate(
             [
-                ("Score", scores, "Peak-fraction score"),
-                ("Score per token", efficiency, "Score per billion tokens"),
+                ("Score", scores, mean_scores, "Peak-fraction score"),
+                (
+                    "Score per token",
+                    efficiency,
+                    combined_efficiency,
+                    "Score per billion tokens",
+                ),
             ]
         ):
             ax = axes[row, col]
             for index, dialect in enumerate(DIALECTS):
                 color = DIALECT_COLORS[dialect]
-                run_1 = values["Run 1"][index]
-                run_2 = values["Run 2"][index]
-                average = values["Average"][index]
-                low, high = min(run_1, run_2), max(run_1, run_2)
+                values = observations[:, index]
+                center = centers[index]
+                low, high = values.min(), values.max()
 
-                # The bar spans the two observed runs. The large diamond is the
-                # mean score or combined efficiency; the circles retain each run.
+                # The bar spans all observed runs. The large diamond is the mean
+                # score or combined efficiency; the circles retain each run.
                 ax.errorbar(
                     index,
-                    average,
-                    yerr=[[average - low], [high - average]],
+                    center,
+                    yerr=[[center - low], [high - center]],
                     fmt="none",
                     ecolor=color,
                     elinewidth=3.0,
@@ -211,8 +216,8 @@ def main() -> None:
                     zorder=1,
                 )
                 ax.scatter(
-                    [index - 0.09, index + 0.09],
-                    [run_1, run_2],
+                    index + run_offsets,
+                    values,
                     s=72,
                     marker="o",
                     color=color,
@@ -223,7 +228,7 @@ def main() -> None:
                 )
                 ax.scatter(
                     index,
-                    average,
+                    center,
                     s=125,
                     marker="D",
                     color=color,
@@ -244,7 +249,8 @@ def main() -> None:
             ax.set_ylim(ymin - padding, ymax + padding)
 
     fig.suptitle(
-        "KernelBench-Hard: Two-run score and token efficiency by problem and dialect",
+        f"KernelBench-Hard: {len(run_results)}-run score and token efficiency "
+        "by problem and dialect",
         fontsize=19,
         fontweight="bold",
     )
