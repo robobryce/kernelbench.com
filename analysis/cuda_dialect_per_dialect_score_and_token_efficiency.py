@@ -130,7 +130,7 @@ def load_point(path: Path, result: dict) -> tuple[float, float]:
     tokens = (usage.get("input_tokens") or 0) + (usage.get("output_tokens") or 0)
     if tokens <= 0:
         raise ValueError(f"missing token usage: {path}")
-    return peak_fraction, tokens / 1e9
+    return 100.0 * peak_fraction, tokens / 1e8
 
 
 def render_chart(
@@ -185,18 +185,20 @@ def render_chart(
         tokens = np.array(
             [[point[1] for point in points] for points in points_by_run]
         )
-        efficiency = scores / tokens
+        # Efficiency uses fractional score per 100 million tokens. Scores are
+        # displayed as percentages, so divide by 100 for this calculation.
+        efficiency = (scores / 100.0) / tokens
         mean_scores = scores.mean(axis=0)
-        combined_efficiency = scores.sum(axis=0) / tokens.sum(axis=0)
+        combined_efficiency = (scores.sum(axis=0) / 100.0) / tokens.sum(axis=0)
 
         for col, (metric, observations, centers, ylabel) in enumerate(
             [
-                ("Score", scores, mean_scores, "Peak-fraction score"),
+                ("Score", scores, mean_scores, "Score (%)"),
                 (
                     "Score per token",
                     efficiency,
                     combined_efficiency,
-                    "Score per billion tokens",
+                    "Score / tokens (score / 100M tokens)",
                 ),
             ]
         ):
