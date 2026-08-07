@@ -127,6 +127,8 @@ def render_chart(
         error_color,
     )
     for ax in axes:
+        ax.set_yscale("log")
+        ax.autoscale(enable=True, axis="y")
         ax.axhline(
             1.0,
             color=reference_color,
