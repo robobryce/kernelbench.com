@@ -70,12 +70,6 @@ def parse_args() -> argparse.Namespace:
         type=run_path,
         help="run directory containing a waves/ subdirectory",
     )
-    parser.add_argument(
-        "--theme",
-        choices=("light", "dark"),
-        default="light",
-        help="plot color theme (default: light)",
-    )
     return parser.parse_args()
 
 
@@ -208,16 +202,21 @@ def draw_bars(
         ax.set_ylim(bottom=0)
 
 
-def main() -> None:
-    args = parse_args()
-    scores, tokens, model, harness = load_data(args.runs)
+def render_chart(
+    scores: np.ndarray,
+    tokens: np.ndarray,
+    model: str,
+    harness: str,
+    run_count: int,
+    theme: str,
+) -> Path:
     # Efficiency uses fractional score per 100 million tokens. Scores are
     # displayed as percentages in the first panel, so divide by 100 here.
     score_per_token = (scores / 100.0) / tokens
     average_scores = scores.mean(axis=0)
     combined_score_per_token = (scores.sum(axis=0) / 100.0) / tokens.sum(axis=0)
 
-    if args.theme == "dark":
+    if theme == "dark":
         plt.style.use("dark_background")
         figure_color = "#000000"
         axes_color = "#000000"
@@ -280,7 +279,7 @@ def main() -> None:
     )
     fig.suptitle(
         "KernelBench-Hard: score and token efficiency by dialect\n"
-        f"Runs: {len(args.runs)}  ·  Model: {MODEL_DISPLAY_NAMES.get(model, model)}"
+        f"Runs: {run_count}  ·  Model: {MODEL_DISPLAY_NAMES.get(model, model)}"
         f"  ·  Harness: {harness}",
         fontsize=18,
         fontweight="bold",
@@ -293,14 +292,22 @@ def main() -> None:
         for line in ax.get_ygridlines():
             line.set_color(grid_color)
 
-    suffix = args.theme
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     output = OUTPUT_DIR / (
         "cuda_dialect__kernelbench_hard__summary_score_and_token_efficiency_"
-        f"{suffix}__{datetime.now(timezone.utc):%Y_%m_%d}.png"
+        f"{theme}__{datetime.now(timezone.utc):%Y_%m_%d}.png"
     )
     fig.savefig(output, dpi=180, bbox_inches="tight", facecolor=figure_color)
-    print(output)
+    plt.close(fig)
+    return output
+
+
+def main() -> None:
+    args = parse_args()
+    scores, tokens, model, harness = load_data(args.runs)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    for theme in ("light", "dark"):
+        output = render_chart(scores, tokens, model, harness, len(args.runs), theme)
+        print(output)
 
 
 if __name__ == "__main__":

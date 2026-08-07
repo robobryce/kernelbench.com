@@ -133,21 +133,23 @@ def load_point(path: Path, result: dict) -> tuple[float, float]:
     return peak_fraction, tokens / 1e9
 
 
-def main() -> None:
-    args = parse_args()
-    run_results = [load_run_results(root) for root in args.runs]
-    models = {
-        result.get("model") or "unknown"
-        for results in run_results
-        for _, result in results.values()
-    }
-    harnesses = {
-        result.get("harness") or "unknown"
-        for results in run_results
-        for _, result in results.values()
-    }
-    if len(models) != 1 or len(harnesses) != 1:
-        raise ValueError(f"mixed model/harness data: models={models}, harnesses={harnesses}")
+def render_chart(
+    run_results: list[dict[tuple[str, int], tuple[Path, dict]]], theme: str
+) -> Path:
+    if theme == "dark":
+        plt.style.use("dark_background")
+        figure_color = "#000000"
+        axes_color = "#000000"
+        grid_color = "#9aa4b2"
+        circle_edge_color = "#000000"
+        diamond_edge_color = "#f3f4f6"
+    else:
+        plt.style.use("default")
+        figure_color = "white"
+        axes_color = "white"
+        grid_color = "#6b7280"
+        circle_edge_color = "white"
+        diamond_edge_color = "#111111"
 
     plt.rcParams.update(
         {
@@ -159,6 +161,9 @@ def main() -> None:
         }
     )
     fig, axes = plt.subplots(6, 2, figsize=(20, 27), constrained_layout=True)
+    fig.patch.set_facecolor(figure_color)
+    for ax in axes.flat:
+        ax.set_facecolor(axes_color)
     x = np.arange(len(DIALECTS))
     run_offsets = (
         np.linspace(-0.12, 0.12, len(run_results))
@@ -222,7 +227,7 @@ def main() -> None:
                     s=72,
                     marker="o",
                     color=color,
-                    edgecolor="white",
+                    edgecolor=circle_edge_color,
                     linewidth=1.1,
                     alpha=0.7,
                     zorder=2,
@@ -233,7 +238,7 @@ def main() -> None:
                     s=125,
                     marker="D",
                     color=color,
-                    edgecolor="#111111",
+                    edgecolor=diamond_edge_color,
                     linewidth=1.2,
                     zorder=3,
                 )
@@ -241,7 +246,7 @@ def main() -> None:
             ax.set_title(f"{problem} — {metric}", fontweight="bold")
             ax.set_ylabel(ylabel)
             ax.set_xticks(x, DIALECTS, rotation=22, ha="right")
-            ax.grid(axis="y", alpha=0.28, linewidth=0.8)
+            ax.grid(axis="y", color=grid_color, alpha=0.28, linewidth=0.8)
             ax.set_axisbelow(True)
 
             # Add breathing room so endpoint caps do not touch the axes.
@@ -264,7 +269,7 @@ def main() -> None:
             linewidth=3,
             markersize=9,
             color=DIALECT_COLORS[dialect],
-            markeredgecolor="#111111",
+            markeredgecolor=diamond_edge_color,
             label=dialect,
         )
         for dialect in DIALECTS
@@ -283,13 +288,35 @@ def main() -> None:
         handlelength=2.4,
         columnspacing=2.0,
     )
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     output = OUTPUT_DIR / (
         "cuda_dialect__kernelbench_hard__per_dialect_score_and_token_efficiency_"
-        f"light__{datetime.now(timezone.utc):%Y_%m_%d}.png"
+        f"{theme}__{datetime.now(timezone.utc):%Y_%m_%d}.png"
     )
-    fig.savefig(output, dpi=180, bbox_inches="tight", facecolor="white")
-    print(output)
+    fig.savefig(output, dpi=180, bbox_inches="tight", facecolor=figure_color)
+    plt.close(fig)
+    return output
+
+
+def main() -> None:
+    args = parse_args()
+    run_results = [load_run_results(root) for root in args.runs]
+    models = {
+        result.get("model") or "unknown"
+        for results in run_results
+        for _, result in results.values()
+    }
+    harnesses = {
+        result.get("harness") or "unknown"
+        for results in run_results
+        for _, result in results.values()
+    }
+    if len(models) != 1 or len(harnesses) != 1:
+        raise ValueError(f"mixed model/harness data: models={models}, harnesses={harnesses}")
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    for theme in ("light", "dark"):
+        output = render_chart(run_results, theme)
+        print(output)
 
 
 if __name__ == "__main__":
