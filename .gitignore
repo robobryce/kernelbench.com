@@ -33,6 +33,7 @@ Thumbs.db
 .vercel
 media/**/*.png
 media/*.png
+/analysis/output/
 benchmarks/hard/experiments/
 /runs/
 /outputs/
