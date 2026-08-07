@@ -15,6 +15,8 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parents[2]
 BENCHES = ("hard", "cuda", "mini", "mega")
 
@@ -168,14 +170,28 @@ def test_bench_wrappers_are_thin_and_use_shared_runner():
         assert len(text.splitlines()) < 30, f"{b}: wrapper no longer thin ({len(text.splitlines())} lines)"
 
 
-def test_lambda_sync_preserves_torch_index_patch():
-    """Re-syncing a bootstrapped node once shipped the Mac's cu130 uv.lock over
-    the node's cu128-patched one; every later graded env build then died with
-    driver-too-old at check time (2026-08-01)."""
-    text = (REPO / "scripts/lambda_worker.sh").read_text()
-    assert "preserving node torch-index patch" in text, (
-        "lambda sync no longer guards the bootstrapped pyproject/uv.lock torch-index patch"
-    )
+@pytest.mark.parametrize("worker", ["brev_worker.sh", "lambda_worker.sh"])
+def test_worker_sync_refreshes_project_before_reapplying_torch_index(worker):
+    """A worker sync must carry new dependencies before its cu128 relock.
+
+    Preserving a node-patched pyproject.toml and uv.lock hid repository changes
+    such as the Hypothesis dependency from already-bootstrapped workers.
+    """
+    text = (REPO / "scripts" / worker).read_text()
+    patcher = text.split("apply_worker_torch_index() {", 1)[1].split("\n}", 1)[0]
+    sync = text.split("\n  sync)", 1)[1].split("\n  bootstrap)", 1)[0]
+    bootstrap = text.split("\n  bootstrap)", 1)[1].split("\n  run)", 1)[0]
+
+    assert "--exclude /pyproject.toml" not in sync
+    assert "--exclude /uv.lock" not in sync
+    probe = sync.index("grep -q pytorch-cu128")
+    transfer = sync.index("$BENCH_DIR/")
+    reapply = sync.index("apply_worker_torch_index")
+    assert probe < transfer < reapply
+    assert '[ "$REMOTE_TORCH_PATCHED" = 1 ]' in sync[:reapply]
+    assert "apply_worker_torch_index" in bootstrap
+    assert patcher.index("pytorch-cu128") < patcher.index("rm -f uv.lock")
+    assert patcher.index("rm -f uv.lock") < patcher.index("uv sync")
 
 
 def test_lambda_sync_ships_shared_runner_lib():

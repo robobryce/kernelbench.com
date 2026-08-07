@@ -44,6 +44,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -60,6 +61,11 @@ from datasets import Dataset
 # `baseline`). To be faithful across both decks we copy EVERY file in the
 # problem dir except generated/agent artifacts (below).
 _PROBLEM_ARTIFACTS = {"solution.py", "framework.txt", "__pycache__", ".pytest_cache"}
+_TRUSTED_WORKSPACE_FILES: dict[str, dict[str, tuple[bytes, int]]] = {}
+_MAX_SOLUTION_BYTES = 128 * 1024 * 1024
+_UNSHARE = shutil.which("unshare")
+_SETPRIV = shutil.which("setpriv")
+_ALLOW_UNISOLATED_NATIVE_FOR_TESTS = False
 
 CODE_RE = re.compile(r"```(?:python|cpp|cuda|py)?\n(.*?)```", re.DOTALL)
 _NUMBER_RE = r"(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?"
@@ -110,11 +116,139 @@ def make_workspace(bench_root: str, problem: str) -> str:
         if src.is_dir():
             continue  # skip __pycache__ etc.
         shutil.copy2(src, pdir / src.name)
+    snapshot: dict[str, tuple[bytes, int]] = {}
+    for trusted_root in (Path(ws) / "src", pdir):
+        for path in trusted_root.rglob("*"):
+            if path.is_file() and "__pycache__" not in path.parts:
+                snapshot[path.relative_to(ws).as_posix()] = (
+                    path.read_bytes(),
+                    path.stat().st_mode & 0o777,
+                )
+    _TRUSTED_WORKSPACE_FILES[str(Path(ws).resolve())] = snapshot
     return ws
 
 
 def problem_dir(ws: str, problem: str) -> Path:
     return Path(ws) / "problems" / problem
+
+
+def _remove_path(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.exists():
+        shutil.rmtree(path)
+
+
+def _restore_trusted_workspace(ws: str, problem: str) -> None:
+    """Restore controller-held checker bytes before every grading subprocess."""
+    workspace = Path(ws).absolute()
+    if workspace.is_symlink() or not workspace.is_dir():
+        raise RuntimeError("workspace root was replaced")
+    resolved_workspace = workspace.resolve()
+    if resolved_workspace != workspace:
+        raise RuntimeError("workspace root is not canonical")
+    snapshot = _TRUSTED_WORKSPACE_FILES.get(str(resolved_workspace))
+    if snapshot is None:
+        return
+    problems_root = workspace / "problems"
+    if (
+        problems_root.is_symlink()
+        or not problems_root.is_dir()
+        or problems_root.resolve() != problems_root
+    ):
+        raise RuntimeError("problems workspace was replaced")
+    pdir = problems_root / problem
+    if pdir.is_symlink() or not pdir.is_dir() or pdir.resolve().parent != problems_root:
+        raise RuntimeError("problem workspace was replaced")
+
+    _remove_path(workspace / "src")
+    for child in tuple(pdir.iterdir()):
+        _remove_path(child)
+
+    for relative, (data, mode) in snapshot.items():
+        destination = workspace.joinpath(*relative.split("/"))
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(data)
+        destination.chmod(mode)
+
+
+def _read_candidate_solution(pdir: Path) -> tuple[bytes, int]:
+    path = pdir / "solution.py"
+    before = path.lstat()
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise RuntimeError("solution.py must be one regular, unlinked file")
+    if before.st_size > _MAX_SOLUTION_BYTES:
+        raise RuntimeError("solution.py exceeds the size limit")
+    data = path.read_bytes()
+    after = path.lstat()
+    if (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+    ) != (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+    ) or len(data) != before.st_size:
+        raise RuntimeError("solution.py changed while reading")
+    return data, stat.S_IMODE(before.st_mode)
+
+
+def _write_candidate_solution(pdir: Path, candidate: tuple[bytes, int]) -> None:
+    path = pdir / "solution.py"
+    _remove_path(path)
+    data, mode = candidate
+    path.write_bytes(data)
+    path.chmod(mode & 0o755)
+
+
+def _native_command(workspace: Path, pdir: Path, script: str) -> list[str]:
+    entrypoint = workspace / "src" / "eval" / "trusted_entrypoint.py"
+    python_command = [sys.executable, "-I", str(entrypoint), script]
+    if _ALLOW_UNISOLATED_NATIVE_FOR_TESTS:
+        return python_command
+    if _UNSHARE is None or _SETPRIV is None:
+        raise RuntimeError("trusted native grading requires unshare and setpriv")
+
+    isolate = """
+home=$1
+workspace=$2
+problem=$3
+setpriv=$4
+shift 4
+/usr/bin/mount --bind "$home" "$home"
+/usr/bin/mount -o remount,bind,ro "$home"
+/usr/bin/mount --bind "$workspace" "$workspace"
+/usr/bin/mount -o remount,bind,rw "$workspace"
+cd "$problem"
+exec "$setpriv" --no-new-privs --bounding-set=-all \
+    --inh-caps=-all --ambient-caps=-all "$@"
+"""
+    return [
+        _UNSHARE,
+        "--user",
+        "--map-root-user",
+        "--net",
+        "--mount",
+        "--pid",
+        "--fork",
+        "--kill-child=KILL",
+        "--mount-proc",
+        "--propagation",
+        "private",
+        "/bin/sh",
+        "-eu",
+        "-c",
+        isolate,
+        "native-isolate",
+        str(Path.home().resolve()),
+        str(workspace),
+        str(pdir),
+        _SETPRIV,
+        *python_command,
+    ]
 
 
 def run_native(ws: str, problem: str, script: str, timeout_s: int) -> tuple[int, str]:
@@ -127,35 +261,66 @@ def run_native(ws: str, problem: str, script: str, timeout_s: int) -> tuple[int,
     with no benchmark uv env and no checkout dependency.
     """
     pdir = problem_dir(ws, problem)
+    workspace = Path(ws).absolute()
+    try:
+        candidate = _read_candidate_solution(pdir)
+        _restore_trusted_workspace(ws, problem)
+        _write_candidate_solution(pdir, candidate)
+    except Exception as exc:
+        return 1, f"trusted workspace restore failed: {type(exc).__name__}: {exc}"
     env = dict(os.environ)
+    cache_root = workspace / ".grading_cache"
+    for name in ("torch_extensions", "triton", "cuda", "xdg", "tmp"):
+        (cache_root / name).mkdir(parents=True, exist_ok=True)
+    env.update(
+        {
+            "PYTHONNOUSERSITE": "1",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "TORCH_EXTENSIONS_DIR": str(cache_root / "torch_extensions"),
+            "TRITON_CACHE_DIR": str(cache_root / "triton"),
+            "CUDA_CACHE_PATH": str(cache_root / "cuda"),
+            "XDG_CACHE_HOME": str(cache_root / "xdg"),
+            "TMPDIR": str(cache_root / "tmp"),
+            "TEMP": str(cache_root / "tmp"),
+            "TMP": str(cache_root / "tmp"),
+        }
+    )
     env.setdefault("CUDA_HOME", env.get("KBH_CUDA_HOME", "/usr/local/cuda-13"))
     cuda_bin = f"{env['CUDA_HOME']}/bin"
     if cuda_bin not in env.get("PATH", ""):
         env["PATH"] = cuda_bin + ":" + env.get("PATH", "")
+    result: tuple[int, str]
     try:
         proc = subprocess.run(
-            [
-                sys.executable,
-                str(Path(ws) / "src" / "eval" / "trusted_entrypoint.py"),
-                script,
-            ],
+            _native_command(workspace, pdir, script),
             cwd=str(pdir),
             env=env,
             capture_output=True,
             text=True,
             timeout=timeout_s,
         )
-        return proc.returncode, (proc.stdout + "\n" + proc.stderr)
+        result = proc.returncode, (proc.stdout + "\n" + proc.stderr)
     except subprocess.TimeoutExpired as e:
         out = (e.stdout or "") + "\n" + (e.stderr or "")
         if isinstance(out, bytes):
             out = out.decode(errors="ignore")
-        return 124, out + f"\nTIMEOUT after {timeout_s}s"
+        result = 124, out + f"\nTIMEOUT after {timeout_s}s"
     except Exception as e:  # pragma: no cover
-        return 1, f"runner error: {type(e).__name__}: {e}"
+        result = 1, f"runner error: {type(e).__name__}: {e}"
+    try:
+        _restore_trusted_workspace(ws, problem)
+        _write_candidate_solution(pdir, candidate)
+    except Exception as exc:
+        return 1, (
+            f"{result[1]}\ntrusted workspace restore failed after grading: "
+            f"{type(exc).__name__}: {exc}"
+        )
+    return result
 
 
-def score_workspace(ws: str, problem: str, check_timeout_s: int, bench_timeout_s: int) -> dict:
+def score_workspace(
+    ws: str, problem: str, check_timeout_s: int, bench_timeout_s: int
+) -> dict:
     """Native scoring contract: check.py ^PASS gate -> benchmark.py peak_fraction.
 
     Operates on an EXISTING workspace whose solution.py is already written.
@@ -189,13 +354,16 @@ def score_workspace(ws: str, problem: str, check_timeout_s: int, bench_timeout_s
     return res
 
 
-def score_solution(bench_root: str, problem: str, code: str, check_timeout_s: int, bench_timeout_s: int) -> dict:
+def score_solution(
+    bench_root: str, problem: str, code: str, check_timeout_s: int, bench_timeout_s: int
+) -> dict:
     """Score a raw solution string in a fresh throwaway workspace (fallback path)."""
     ws = make_workspace(bench_root, problem)
     try:
         (problem_dir(ws, problem) / "solution.py").write_text(code)
         return score_workspace(ws, problem, check_timeout_s, bench_timeout_s)
     finally:
+        _TRUSTED_WORKSPACE_FILES.pop(str(Path(ws).resolve()), None)
         shutil.rmtree(ws, ignore_errors=True)
 
 
@@ -218,7 +386,9 @@ def discover_problems(bench_root: str, deck: list[str] | None) -> list[str]:
 def _build_question(bench_root: str, problem: str) -> str:
     pdir = Path(bench_root) / "problems" / problem
     prompt = (pdir / "PROMPT.txt").read_text() if (pdir / "PROMPT.txt").exists() else ""
-    reference = (pdir / "reference.py").read_text() if (pdir / "reference.py").exists() else ""
+    reference = (
+        (pdir / "reference.py").read_text() if (pdir / "reference.py").exists() else ""
+    )
     return (
         f"{prompt}\n\n"
         "You are in a persistent workspace for this problem. Available tools:\n"
@@ -276,7 +446,9 @@ class KernelHarnessEnv(vf.StatefulToolEnv):
             problem = (state.get("info") or {}).get("problem") or state.get("answer")
             ws = self._ws(state, problem)
             (problem_dir(ws, problem) / "solution.py").write_text(code)
-            return f"solution.py written ({len(code)} chars). Run run_check() to verify."
+            return (
+                f"solution.py written ({len(code)} chars). Run run_check() to verify."
+            )
 
         def run_check(state: dict) -> str:
             """Run the harness check.py (correctness gate over all shapes)."""
@@ -347,12 +519,19 @@ def _build_rubric(
                 if not code:
                     return 0.0
                 res = await asyncio.to_thread(
-                    score_solution, bench_root, problem, code, check_timeout_s, bench_timeout_s
+                    score_solution,
+                    bench_root,
+                    problem,
+                    code,
+                    check_timeout_s,
+                    bench_timeout_s,
                 )
         state["correct"] = bool(res["correct"])
         state["peak_fraction"] = float(res["peak_fraction"])
         state["raw_peak_fraction"] = float(res["raw_peak_fraction"])
-        state["_bench"] = {k: v for k, v in res.items() if k not in ("check_log", "bench_log")}
+        state["_bench"] = {
+            k: v for k, v in res.items() if k not in ("check_log", "bench_log")
+        }
         if not state["correct"]:
             return 0.0
         return state["peak_fraction"]
@@ -367,12 +546,18 @@ def _build_rubric(
         return float(state.get("raw_peak_fraction", 0.0))
 
     mechanical = vf.Rubric(
-        funcs=[mechanical_reward, correct_metric, peak_fraction_metric, raw_peak_fraction_metric],
+        funcs=[
+            mechanical_reward,
+            correct_metric,
+            peak_fraction_metric,
+            raw_peak_fraction_metric,
+        ],
         weights=[1.0, 0.0, 0.0, 0.0],
         parser=parser,
     )
 
     if not enable_judge:
+
         def judge_noop(state, **kw) -> float:
             return 0.0
 
@@ -392,8 +577,16 @@ def _build_rubric(
             code = (problem_dir(ws, problem) / "solution.py").read_text()
         else:
             code = extract_solution(completion)
-        base_url = judge_base_url or os.environ.get("OPENROUTER_BASE_URL") or "https://openrouter.ai/api/v1"
-        api_key = judge_api_key or os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        base_url = (
+            judge_base_url
+            or os.environ.get("OPENROUTER_BASE_URL")
+            or "https://openrouter.ai/api/v1"
+        )
+        api_key = (
+            judge_api_key
+            or os.environ.get("OPENROUTER_API_KEY")
+            or os.environ.get("OPENAI_API_KEY")
+        )
         if not api_key:
             return 1.0  # fail open
 
@@ -431,7 +624,9 @@ def _build_rubric(
     def judge_metric(state, **kw) -> float:
         return 1.0 if state.get("judge_legitimate", True) else 0.0
 
-    judge = vf.Rubric(funcs=[judge_veto, judge_metric], weights=[1.0, 0.0], parser=parser)
+    judge = vf.Rubric(
+        funcs=[judge_veto, judge_metric], weights=[1.0, 0.0], parser=parser
+    )
     return _MultiplicativeRubricGroup(mechanical, judge, parser)
 
 
@@ -487,7 +682,9 @@ def build_environment(
         train, eval = problems, []
 
     dataset = Dataset.from_list(_make_rows(bench_root, train, hardware))
-    eval_dataset = Dataset.from_list(_make_rows(bench_root, eval, hardware)) if eval else None
+    eval_dataset = (
+        Dataset.from_list(_make_rows(bench_root, eval, hardware)) if eval else None
+    )
 
     parser = vf.Parser(extract_fn=extract_solution)
     sem = asyncio.Semaphore(max_concurrent)

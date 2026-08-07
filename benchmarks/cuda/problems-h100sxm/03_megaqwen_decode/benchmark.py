@@ -18,9 +18,10 @@ sys.path.insert(0, str(REPO_ROOT))
 def main():
     import reference
     import shapes
-    import solution
 
     meta = yaml.safe_load(Path("problem.yaml").read_text())
+    import solution
+
     peak = float(meta.get("peak_tok_s", 5e4))
     num_perf_trials = int(meta.get("num_perf_trials", 3))
 
@@ -88,7 +89,6 @@ def main():
                 torch.cuda.synchronize()
                 full = time.perf_counter() - t0
                 # one prefill-only estimate via reference (not ideal)
-                t1 = time.perf_counter()
                 reference.prefill(
                     reference.Model(reference.NUM_LAYERS, max_seq).cuda().eval(),
                     ctx,

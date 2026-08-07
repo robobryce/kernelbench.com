@@ -27,7 +27,6 @@ def main() -> None:
     try:
         import reference
         import shapes
-        import solution
     except Exception as e:
         print(f"FAIL: import error: {e}")
         sys.exit(1)
@@ -113,6 +112,12 @@ def main() -> None:
             if _imp == _mod or _imp.startswith(_mod + ".") or _mod.startswith(_imp + "."):
                 print(f"FAIL: forbidden import used: {forbidden} (imported as {_imp})")
                 sys.exit(1)
+
+    try:
+        import solution
+    except Exception as e:
+        print(f"FAIL: solution import error: {e}")
+        sys.exit(1)
 
     thr = float(meta["tolerance"]["cos_sim"])
     cfg = reference.build_config(shapes.SHAPES[0])

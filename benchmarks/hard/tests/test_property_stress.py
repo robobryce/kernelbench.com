@@ -116,7 +116,7 @@ def test_sonic_property_guard_rejects_average_plus_one_block_truncation() -> Non
             Truncated(),
             [hidden, offsets],
             tolerance={"float32": 1e-4},
-            cases=(),
+            cases=(_generated_property_case("06_sonic_moe_swiglu"),),
         )
 
 
@@ -133,7 +133,7 @@ def test_sonic_property_guard_accepts_complete_implementation() -> None:
             Reference(),
             [hidden, offsets],
             tolerance={"float32": 1e-4},
-            cases=(),
+            cases=(_generated_property_case("06_sonic_moe_swiglu"),),
         )
         == 0
     )
@@ -219,6 +219,22 @@ def test_invalid_property_seed_environment_is_rejected(monkeypatch, value) -> No
         generate_property_cases("03_paged_attention")
 
 
+def test_same_storage_replay_requires_a_generated_noncanonical_case() -> None:
+    class Reference(torch.nn.Module):
+        def forward(self, x):
+            return torch.topk(x, k=64, dim=-1)
+
+    with pytest.raises(ValueError, match="generated noncanonical case"):
+        check_topk_properties(
+            Reference(),
+            Reference(),
+            [torch.randn(1, 128)],
+            k=64,
+            tolerance={"float32": 1e-4},
+            cases=(canonical_property_case("05_topk_bitonic"),),
+        )
+
+
 def test_topk_replay_guard_rejects_cached_output_on_same_storage() -> None:
     class Reference(torch.nn.Module):
         def forward(self, x):
@@ -234,7 +250,6 @@ def test_topk_replay_guard_rejects_cached_output_on_same_storage() -> None:
                 self.cached = torch.topk(x, k=64, dim=-1)
             return self.cached
 
-    case = canonical_property_case("05_topk_bitonic")
     with pytest.raises(AssertionError, match="property case"):
         check_topk_properties(
             Reference(),
@@ -242,7 +257,7 @@ def test_topk_replay_guard_rejects_cached_output_on_same_storage() -> None:
             [torch.randn(1, 128)],
             k=64,
             tolerance={"float32": 1e-4},
-            cases=(case,),
+            cases=(_generated_property_case("05_topk_bitonic"),),
         )
 
 
@@ -264,7 +279,6 @@ def test_topk_replay_guard_rejects_version_keyed_cache() -> None:
                 self.cached = torch.topk(x, k=64, dim=-1)
             return self.cached
 
-    case = canonical_property_case("05_topk_bitonic")
     with pytest.raises(AssertionError, match="property case"):
         check_topk_properties(
             Reference(),
@@ -272,7 +286,46 @@ def test_topk_replay_guard_rejects_version_keyed_cache() -> None:
             [torch.randn(1, 128)],
             k=64,
             tolerance={"float32": 1e-4},
-            cases=(case,),
+            cases=(_generated_property_case("05_topk_bitonic"),),
+        )
+
+
+def test_topk_replay_guard_rejects_canonical_aware_version_cache() -> None:
+    class Reference(torch.nn.Module):
+        def forward(self, x):
+            return torch.topk(x, k=64, dim=-1)
+
+    inputs = [torch.randn(1, 128)]
+    (canonical_x,) = apply_property_case(
+        "05_topk_bitonic",
+        inputs,
+        canonical_property_case("05_topk_bitonic"),
+    )
+
+    class CanonicalAwareVersionCached(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.key = None
+            self.cached = None
+
+        def forward(self, x):
+            key = (x.data_ptr(), x._version)
+            if key != self.key or torch.equal(x, canonical_x):
+                self.key = key
+                self.cached = torch.topk(x, k=64, dim=-1)
+            return self.cached
+
+    with pytest.raises(AssertionError, match="property case"):
+        check_topk_properties(
+            Reference(),
+            CanonicalAwareVersionCached(),
+            inputs,
+            k=64,
+            tolerance={"float32": 1e-4},
+            cases=(
+                canonical_property_case("05_topk_bitonic"),
+                _generated_property_case("05_topk_bitonic"),
+            ),
         )
 
 
@@ -308,7 +361,7 @@ def test_topk_replay_guard_crosses_benchmark_warmup_activation() -> None:
             [torch.randn(1, 128)],
             k=64,
             tolerance={"float32": 1e-4},
-            cases=(),
+            cases=(_generated_property_case("05_topk_bitonic"),),
         )
     # The benchmark warmups plus one first timed-style call all see nominal
     # storage; the following mutated replay must expose the cache.
@@ -320,7 +373,6 @@ def test_topk_replay_guard_accepts_recomputing_kernel() -> None:
         def forward(self, x):
             return torch.topk(x, k=64, dim=-1)
 
-    case = canonical_property_case("05_topk_bitonic")
     inputs = [torch.randn(1, 128)]
     original = inputs[0].clone()
     assert (
@@ -330,7 +382,7 @@ def test_topk_replay_guard_accepts_recomputing_kernel() -> None:
             inputs,
             k=64,
             tolerance={"float32": 1e-4},
-            cases=(case,),
+            cases=(_generated_property_case("05_topk_bitonic"),),
         )
         == 0
     )
@@ -363,7 +415,7 @@ def test_topk_property_guard_rejects_warmup_metadata_mutation() -> None:
             [torch.randn(1, 128)],
             k=64,
             tolerance={"float32": 1e-4},
-            cases=(),
+            cases=(_generated_property_case("05_topk_bitonic"),),
         )
 
 
@@ -392,7 +444,40 @@ def test_tensor_replay_guard_rejects_version_keyed_cache() -> None:
             VersionCached(),
             _small_kda_inputs(),
             tolerance={"float32": 1e-4},
-            cases=(),
+            cases=(_generated_property_case("02_kda_cutlass"),),
+        )
+
+
+def test_tensor_replay_guard_rejects_canonical_aware_version_cache() -> None:
+    class Reference(torch.nn.Module):
+        def forward(self, q, _k, v, _g, _beta):
+            return q + v
+
+    class CanonicalAwareVersionCached(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.key = None
+            self.cached = None
+
+        def forward(self, q, _k, v, g, beta):
+            key = (q.data_ptr(), q._version, v.data_ptr(), v._version)
+            is_canonical = bool(torch.all(g == -0.003) and torch.all(beta == 0.8))
+            if key != self.key or is_canonical:
+                self.key = key
+                self.cached = q + v
+            return self.cached
+
+    with pytest.raises(AssertionError, match="property case"):
+        check_tensor_properties(
+            "02_kda_cutlass",
+            Reference(),
+            CanonicalAwareVersionCached(),
+            _small_kda_inputs(),
+            tolerance={"float32": 1e-4},
+            cases=(
+                canonical_property_case("02_kda_cutlass"),
+                _generated_property_case("02_kda_cutlass"),
+            ),
         )
 
 
@@ -416,7 +501,7 @@ def test_tensor_property_guard_rejects_warmup_input_mutation() -> None:
             MutatingZero(),
             _small_kda_inputs(),
             tolerance={"float32": 1e-4},
-            cases=(canonical_property_case("02_kda_cutlass"),),
+            cases=(_generated_property_case("02_kda_cutlass"),),
         )
 
 
@@ -444,7 +529,7 @@ def test_tensor_property_guard_rejects_warmup_metadata_mutation() -> None:
             Transposing(),
             _small_kda_inputs(),
             tolerance={"float32": 1e-4},
-            cases=(),
+            cases=(_generated_property_case("02_kda_cutlass"),),
         )
 
 
@@ -453,7 +538,6 @@ def test_tensor_property_guard_accepts_recomputing_kernel() -> None:
         def forward(self, q, _k, v, _g, _beta):
             return q + v
 
-    case = canonical_property_case("02_kda_cutlass")
     inputs = _small_kda_inputs()
     originals = [value.clone() for value in inputs]
     assert (
@@ -463,7 +547,7 @@ def test_tensor_property_guard_accepts_recomputing_kernel() -> None:
             Reference(),
             inputs,
             tolerance={"float32": 1e-4},
-            cases=(case,),
+            cases=(_generated_property_case("02_kda_cutlass"),),
         )
         == 0
     )
@@ -491,7 +575,7 @@ def test_tensor_property_guard_rejects_tensor_subclass_output() -> None:
             Deferred(),
             _small_kda_inputs(),
             tolerance={"float32": 1e-4},
-            cases=(),
+            cases=(_generated_property_case("02_kda_cutlass"),),
         )
 
 
@@ -509,7 +593,22 @@ def test_all_gpu_decks_freeze_property_plan_before_importing_solution() -> None:
             assert "generate_property_cases" in checker
             assert "property stress" in checker
             plan = checker.index("_, property_cases = generate_property_cases")
-            assert plan < checker.index("import solution")
+            solution_import = checker.index("import solution")
+            assert plan < solution_import
+            assert checker.index("property_shape = property_shape_index") < solution_import
+            assert checker.index("property_tolerance = tolerance_for_property") < solution_import
+            guard = (
+                "check_topk_properties"
+                if problem == "05_topk_bitonic"
+                else "check_tensor_properties"
+            )
+            assert checker.index(f"property_check = {guard}") < solution_import
+            after_import = checker[solution_import:]
+            assert "if shape_idx == property_shape:" in after_import
+            assert "property_check(" in after_import
+            assert f"{guard}(" not in after_import
+            assert "property_shape_index(" not in after_import
+            assert "tolerance_for_property(" not in after_import
 
 
 def test_all_property_checker_copies_are_identical() -> None:
@@ -528,6 +627,34 @@ def _draw_cases(problem_name: str):
     seen = []
     run_property_cases(problem_name, seen.append, seed=7, max_examples=1)
     return seen
+
+
+def _generated_property_case(problem_name: str):
+    cases = {
+        "02_kda_cutlass": KDALongMemoryCase(
+            split_chunks=7,
+            key_millivalue=43,
+            query_scale_percent=900,
+            value_scale_percent=850,
+            decay_micros=2_500,
+            beta_percent=75,
+        ),
+        "03_paged_attention": PagedShortSequenceCase(divisor=7, tail=5, stride=2),
+        "05_topk_bitonic": TopKClusterCase(
+            partition=7,
+            offset=11,
+            extra_values=5,
+            baseline_quarters=3,
+        ),
+        "06_sonic_moe_swiglu": SonicRaggedMixedCase(
+            receiver=2,
+            donor=3,
+            row_delta=129,
+            prefix_rows=32,
+            suffix_scale=7,
+        ),
+    }
+    return cases[problem_name]
 
 
 def _small_kda_inputs() -> list[torch.Tensor]:

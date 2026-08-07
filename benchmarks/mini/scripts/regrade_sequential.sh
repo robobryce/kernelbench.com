@@ -40,13 +40,22 @@ if [ ! -f "$TRUSTED_ENTRYPOINT" ]; then
     echo "FATAL: trusted grading entrypoint is missing" >&2
     exit 3
 fi
+SUBMISSION_BUNDLE_TOOL="$(cd "$SCRIPT_DIR/../../.." && pwd)/scripts/lib/submission_bundle.py"
+if [ ! -f "$SUBMISSION_BUNDLE_TOOL" ]; then
+    # Thin worker payloads carry shared helpers beside the benchmark scripts.
+    SUBMISSION_BUNDLE_TOOL="$SCRIPT_DIR/lib/submission_bundle.py"
+fi
+SUBMISSION_BUNDLE_SOURCE=""
 
 GPU="${KBH_REGRADE_GPU:-0}"
 DRY="${KBH_REGRADE_DRY_RUN:-0}"
 CHECK_TIMEOUT="${KBH_CHECK_TIMEOUT_SECONDS:-1800}"
 
 KBH_CUDA_HOME="${KBH_CUDA_HOME:-/usr/local/cuda-13}"
-[ -d "$KBH_CUDA_HOME" ] && export CUDA_HOME="$KBH_CUDA_HOME"
+if [ -d "$KBH_CUDA_HOME" ]; then
+    export CUDA_HOME="$KBH_CUDA_HOME"
+    export PATH="$CUDA_HOME/bin:$PATH"
+fi
 
 # The whole point is that we own the GPU, so bypass the lock wrapper rather
 # than queue behind it.
@@ -92,6 +101,45 @@ purge_untrusted_bytecode() {
         -delete || return 1
 }
 
+run_submission_bundle() {
+    # Execute the pre-grading snapshot, so check.py cannot replace the helper
+    # that verifies and extracts the independent benchmark replay.
+    python3 -I -S -c "$SUBMISSION_BUNDLE_SOURCE" "$@"
+}
+
+prepare_bundle_stage() {
+    local stage_name="$1"
+    local stage_root="$BUNDLE_REPLAY_ROOT/$stage_name/repo"
+    local stage_problem="$stage_root/problems/$PROBLEM"
+    local item
+
+    if [ ! -d "$WORKSPACE_ROOT/src" ]; then
+        echo "FATAL: bundle regrade workspace is missing trusted src/" >&2
+        return 1
+    fi
+    mkdir -p "$stage_root/problems" || return 1
+    /bin/cp -a "$WORKSPACE_ROOT/src" "$stage_root/src" || return 1
+    for item in pyproject.toml uv.lock .python-version; do
+        if [ ! -f "$WORKSPACE_ROOT/$item" ]; then
+            echo "FATAL: bundle regrade workspace is missing $item" >&2
+            return 1
+        fi
+        cp -p "$WORKSPACE_ROOT/$item" "$stage_root/$item" || return 1
+    done
+    run_submission_bundle extract \
+        "$RUN_DIR/submission" "$stage_problem" --expect "$BUNDLE_DIGEST" \
+        >/dev/null || return 1
+    for item in reference.py sota.py shapes.py problem.yaml check.py benchmark.py PROMPT.txt; do
+        if [ ! -f "$PROBLEM_DIR/$item" ]; then
+            echo "FATAL: bundle regrade workspace is missing trusted $item" >&2
+            return 1
+        fi
+        cp -p "$PROBLEM_DIR/$item" "$stage_problem/$item" || return 1
+    done
+    purge_untrusted_bytecode "$stage_root" || return 1
+    BUNDLE_STAGE_PROBLEM="$stage_problem"
+}
+
 PASS=0; FAIL=0; SKIP=0
 
 for RUN_DIR in "$@"; do
@@ -101,12 +149,58 @@ for RUN_DIR in "$@"; do
     if [ ! -f "$RUN_DIR/result.json" ]; then
         echo "[skip] $RID: no result.json (run never scored)"; SKIP=$((SKIP+1)); continue
     fi
-    if [ ! -f "$RUN_DIR/solution.py" ]; then
+    RESULT_RC=0
+    RESULT_METADATA="$(python3 -I -S - "$RUN_DIR/result.json" <<'PY'
+import json
+import re
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        result = json.load(handle)
+except (OSError, UnicodeError, ValueError, RecursionError):
+    raise SystemExit(2)
+if type(result) is not dict:
+    raise SystemExit(2)
+keys = ("submission_bundle_status", "submission_manifest_sha256")
+if not any(key in result for key in keys):
+    print("legacy")
+    raise SystemExit
+status = result.get("submission_bundle_status")
+digest = result.get("submission_manifest_sha256")
+if status != "captured" or type(digest) is not str or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+    raise SystemExit(3)
+print(f"bundle {digest}")
+PY
+    )" || RESULT_RC=$?
+    if [ "$RESULT_RC" -eq 2 ]; then
+        echo "FATAL: $RID has unreadable result metadata; refusing to regrade" >&2
+        exit 3
+    fi
+    if [ "$RESULT_RC" -ne 0 ]; then
+        echo "FATAL: $RID has invalid or incomplete submission bundle metadata; refusing to regrade" >&2
+        exit 3
+    fi
+    RESULT_KIND="${RESULT_METADATA%% *}"
+    if [ "$RESULT_KIND" = "bundle" ]; then
+        BUNDLE_DIGEST="${RESULT_METADATA#* }"
+        if [ ! -f "$SUBMISSION_BUNDLE_TOOL" ]; then
+            echo "FATAL: submission bundle helper is missing; refusing to regrade $RID" >&2
+            exit 3
+        fi
+        SUBMISSION_BUNDLE_SOURCE="$(<"$SUBMISSION_BUNDLE_TOOL")"
+        if ! run_submission_bundle verify \
+            "$RUN_DIR/submission" --expect "$BUNDLE_DIGEST" >/dev/null; then
+            echo "FATAL: $RID submission bundle failed verification; refusing to regrade" >&2
+            exit 3
+        fi
+    elif [ ! -f "$RUN_DIR/solution.py" ]; then
         echo "[skip] $RID: no solution.py"; SKIP=$((SKIP+1)); continue
     fi
 
     PROBLEM=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['problem'])" "$RUN_DIR/result.json")
-    PROBLEM_DIR="$RUN_DIR/repo/problems/$PROBLEM"
+    WORKSPACE_ROOT="$RUN_DIR/repo"
+    PROBLEM_DIR="$WORKSPACE_ROOT/problems/$PROBLEM"
     if [ ! -d "$PROBLEM_DIR" ]; then
         echo "[skip] $RID: archive workspace missing ($PROBLEM_DIR)"; SKIP=$((SKIP+1)); continue
     fi
@@ -117,15 +211,16 @@ for RUN_DIR in "$@"; do
         echo "    [dry-run] would grade in $PROBLEM_DIR"; continue
     fi
 
-    # run_hard.sh clears non-template files from the workspace after archiving,
-    # so restore the solution and any sidecars it depended on (.cu files, helper
-    # modules) before replaying the graded path.
-    cp "$RUN_DIR/solution.py" "$PROBLEM_DIR/solution.py"
-    if [ -d "$RUN_DIR/scratch" ]; then
-        cp -r "$RUN_DIR/scratch/." "$PROBLEM_DIR/" 2>/dev/null || true
+    if [ "$RESULT_KIND" = "legacy" ]; then
+        # Preserve the historical projection path only for archives that
+        # predate bundle metadata entirely.
+        cp "$RUN_DIR/solution.py" "$PROBLEM_DIR/solution.py"
+        if [ -d "$RUN_DIR/scratch" ]; then
+            cp -r "$RUN_DIR/scratch/." "$PROBLEM_DIR/" 2>/dev/null || true
+        fi
+        # Purge only after restoring every candidate-controlled archived file.
+        purge_untrusted_bytecode "$PROBLEM_DIR" || exit 3
     fi
-    # Purge only after restoring every candidate-controlled archived file.
-    purge_untrusted_bytecode "$PROBLEM_DIR" || exit 3
 
     require_idle_gpu || { SKIP=$((SKIP+1)); continue; }
 
@@ -134,6 +229,8 @@ for RUN_DIR in "$@"; do
     export TORCH_EXTENSIONS_DIR="$RUN_DIR/cache/torch_extensions"
     export TRITON_CACHE_DIR="$RUN_DIR/cache/triton"
     export CUDA_CACHE_PATH="$RUN_DIR/cache/cuda"
+    # Fresh bundle stages still use the archived run's one locked environment.
+    export UV_PROJECT="$WORKSPACE_ROOT"
     export TMPDIR="$RUN_DIR/tmp" TEMP="$RUN_DIR/tmp" TMP="$RUN_DIR/tmp"
     mkdir -p "$TORCH_EXTENSIONS_DIR" "$TRITON_CACHE_DIR" "$CUDA_CACHE_PATH" "$TMPDIR"
 
@@ -152,10 +249,22 @@ for RUN_DIR in "$@"; do
     CLOG="$RUN_DIR/check.log"
     BLOG="$RUN_DIR/benchmark.log"
 
+    CHECK_PROBLEM_DIR="$PROBLEM_DIR"
+    BUNDLE_REPLAY_ROOT=""
+    if [ "$RESULT_KIND" = "bundle" ]; then
+        BUNDLE_REPLAY_ROOT="$(mktemp -d "$RUN_DIR/.regrade-bundle.XXXXXX")" || exit 3
+        if ! prepare_bundle_stage check; then
+            /bin/rm -rf -- "$BUNDLE_REPLAY_ROOT"
+            echo "FATAL: could not restore verified bundle for $RID check" >&2
+            exit 3
+        fi
+        CHECK_PROBLEM_DIR="$BUNDLE_STAGE_PROBLEM"
+    fi
+
     echo "    check.py..."
     C0=$(date +%s); CEXIT=0
-    (cd "$PROBLEM_DIR" && timeout "$CHECK_TIMEOUT" \
-        uv run python "$TRUSTED_ENTRYPOINT" check.py) > "$CLOG" 2>&1 || CEXIT=$?
+    (cd "$CHECK_PROBLEM_DIR" && timeout "$CHECK_TIMEOUT" \
+        uv run python -I "$TRUSTED_ENTRYPOINT" check.py) > "$CLOG" 2>&1 || CEXIT=$?
     CEL=$(( $(date +%s) - C0 ))
 
     CORRECT=false; SCORE=null; BEXIT=null; BEL=null
@@ -163,10 +272,20 @@ for RUN_DIR in "$@"; do
     if [ "$CEXIT" -eq 0 ] && [ "$CPASS_COUNT" -eq 1 ]; then
         CORRECT=true
         echo "    benchmark.py..."
-        purge_untrusted_bytecode "$PROBLEM_DIR" || exit 3
+        BENCH_PROBLEM_DIR="$PROBLEM_DIR"
+        if [ "$RESULT_KIND" = "bundle" ]; then
+            if ! prepare_bundle_stage benchmark; then
+                /bin/rm -rf -- "$BUNDLE_REPLAY_ROOT"
+                echo "FATAL: could not restore verified bundle for $RID benchmark" >&2
+                exit 3
+            fi
+            BENCH_PROBLEM_DIR="$BUNDLE_STAGE_PROBLEM"
+        else
+            purge_untrusted_bytecode "$PROBLEM_DIR" || exit 3
+        fi
         B0=$(date +%s); BEXIT=0
-        (cd "$PROBLEM_DIR" && timeout "$BENCH_TIMEOUT" \
-            uv run python "$TRUSTED_ENTRYPOINT" benchmark.py) > "$BLOG" 2>&1 || BEXIT=$?
+        (cd "$BENCH_PROBLEM_DIR" && timeout "$BENCH_TIMEOUT" \
+            uv run python -I "$TRUSTED_ENTRYPOINT" benchmark.py) > "$BLOG" 2>&1 || BEXIT=$?
         BEL=$(( $(date +%s) - B0 ))
         SCORE_RE='^peak_fraction:[[:space:]]*([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?[[:space:]]*$'
         SCORE_COUNT=$(grep -aEc "$SCORE_RE" "$BLOG" || true)
@@ -229,6 +348,10 @@ if isinstance(old, (int, float)) and isinstance(new, (int, float)) and old:
     delta = "  (%+.1f%%)" % ((new - old) / old * 100)
 print("    correct=%s  peak %s -> %s%s" % (r["correct"], old, new, delta))
 PY
+
+    if [ -n "$BUNDLE_REPLAY_ROOT" ]; then
+        /bin/rm -rf -- "$BUNDLE_REPLAY_ROOT"
+    fi
 
     # uv run recreates repo/.venv during regrade; drop it again so archives stay thin.
     # shellcheck source=../../../scripts/lib/strip_run_venv.sh

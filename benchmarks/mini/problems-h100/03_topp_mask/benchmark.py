@@ -34,9 +34,10 @@ def _eval_formula(expr: str, vars: dict) -> float:
 def main():
     import reference
     import shapes
-    import solution
 
     meta = yaml.safe_load(Path("problem.yaml").read_text())
+    import solution
+
     hw = get_hw(meta["hardware"][0])
     peak_gbps = hw.peak_bandwidth_gb_s
     num_perf_trials = int(meta.get("num_perf_trials", 50))

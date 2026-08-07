@@ -14,11 +14,12 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
+import reference as ref  # noqa: E402
+import shapes as shape_mod  # noqa: E402
+
 from src.eval import cuda_language as cl  # noqa: E402
 from src.eval.correctness import check_correctness  # noqa: E402
 from src.eval.cuda_language import collect_solution_sources  # noqa: E402
-import reference as ref  # noqa: E402
-import shapes as shape_mod  # noqa: E402
 
 
 def _reinit(model: torch.nn.Module, seed: int) -> None:
@@ -37,12 +38,6 @@ def _reinit(model: torch.nn.Module, seed: int) -> None:
 
 
 def main():
-    try:
-        import solution
-    except Exception as e:
-        print(f"FAIL: import error: {e}")
-        sys.exit(1)
-
     meta = yaml.safe_load(Path("problem.yaml").read_text()) if Path("problem.yaml").exists() else {}
     sol_src = collect_solution_sources(Path("."))
     for forbidden in meta.get("forbidden", []):
@@ -61,6 +56,12 @@ def main():
         f"cuda_language: ok framework={report['framework']} "
         f"evidence={','.join(report['cuda_evidence']) or 'none'}"
     )
+
+    try:
+        import solution
+    except Exception as e:
+        print(f"FAIL: solution import error: {e}")
+        sys.exit(1)
 
     if not hasattr(solution, "Model"):
         print("FAIL: solution.py must define Model")

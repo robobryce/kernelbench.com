@@ -46,13 +46,12 @@ def main():
         print(f"FAIL: import error: {e}")
         sys.exit(1)
 
-    _, property_cases = generate_property_cases(meta.get("name", ""))
-    try:
-        import solution
-    except Exception as e:
-        print(f"FAIL: solution import error: {e}")
-        sys.exit(1)
-
+    problem_name = meta.get("name", "")
+    tol_override = meta.get("tolerance") or None
+    _, property_cases = generate_property_cases(problem_name)
+    property_shape = property_shape_index(problem_name)
+    property_tolerance = tolerance_for_property(problem_name, tol_override)
+    property_check = check_tensor_properties
     sol_src = Path("solution.py").read_text() if Path("solution.py").exists() else ""
     for forbidden in meta.get("forbidden", []):
         pat = re.escape(forbidden)
@@ -60,8 +59,13 @@ def main():
             print(f"FAIL: forbidden op used: {forbidden}")
             sys.exit(1)
 
+    try:
+        import solution
+    except Exception as e:
+        print(f"FAIL: solution import error: {e}")
+        sys.exit(1)
+
     device = torch.device("cuda:0")
-    tol_override = meta.get("tolerance") or None
 
     all_shapes = shapes.SHAPES
     for shape_idx, shape in enumerate(all_shapes):
@@ -98,17 +102,17 @@ def main():
                     print(f"FAIL: shape {shape_idx} {shape} seed {seed} case {case.name}: {msg}")
                     sys.exit(1)
 
-        if shape_idx == property_shape_index(meta.get("name", "")):
+        if shape_idx == property_shape:
             torch.manual_seed(0xC0DE)
             torch.cuda.manual_seed_all(0xC0DE)
             base_inputs = [value.to(device) for value in reference.get_inputs()]
             try:
-                check_tensor_properties(
-                    meta.get("name", ""),
+                property_check(
+                    problem_name,
                     ref_model,
                     sol_model,
                     base_inputs,
-                    tolerance=tolerance_for_property(meta.get("name", ""), tol_override),
+                    tolerance=property_tolerance,
                     cases=property_cases,
                 )
             except Exception as e:

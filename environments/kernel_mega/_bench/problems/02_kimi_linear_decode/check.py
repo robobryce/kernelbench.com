@@ -27,7 +27,6 @@ def main() -> None:
     try:
         import reference
         import shapes
-        import solution
     except Exception as e:
         print(f"FAIL: import error: {e}")
         sys.exit(1)
@@ -38,6 +37,12 @@ def main() -> None:
         if re.search(re.escape(forbidden), sol_src):
             print(f"FAIL: forbidden op used: {forbidden}")
             sys.exit(1)
+
+    try:
+        import solution
+    except Exception as e:
+        print(f"FAIL: solution import error: {e}")
+        sys.exit(1)
 
     thr = float(meta["tolerance"]["cos_sim"])
     cfg = reference.build_config(shapes.SHAPES[0])

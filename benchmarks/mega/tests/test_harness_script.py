@@ -15,6 +15,40 @@ def test_post_run_timeout_starts_inside_gpu_lock() -> None:
     assert "timeout 1800 uv run python benchmark.py" not in script
 
 
+def test_official_grading_uses_immutable_offline_replays() -> None:
+    script = RUN_HARD.read_text()
+    assert "run_submission_bundle capture" in script
+    assert "restore_candidate_from_bundle check" in script
+    assert "restore_candidate_from_bundle benchmark" in script
+    assert "run_submission_bundle project" in script
+    assert script.count("restore_trusted_entrypoint") >= 3
+    assert '"${GRADE_COMMAND[@]}" "$TRUSTED_PYTHON" -I' in script
+    assert '/usr/bin/mount -o remount,bind,ro "$home"' in script
+    assert "--user --map-root-user --net --mount --pid --fork" in script
+    assert "--kill-child=KILL --mount-proc" in script
+
+
+def test_grading_lock_and_helper_are_not_candidate_writable() -> None:
+    script = RUN_HARD.read_text()
+    assert 'GPU_LOCK_EXEC_SOURCE="$(<"$LOCK_WRAPPER_DIR/gpu-lock-exec")"' in script
+    assert '"$real" "$@" 3>&- 9>&-' in script
+    assert 'PATH=/usr/bin:/bin /bin/bash -c "$GPU_LOCK_EXEC_SOURCE"' in script
+    assert 'TRUSTED_ENTRYPOINT_B64="$(/usr/bin/base64 -w0' in script
+
+
+def test_submission_bundle_helper_supports_monorepo_and_thin_worker_layouts() -> None:
+    script = RUN_HARD.read_text()
+    start = script.index('SUBMISSION_BUNDLE_TOOL=""')
+    end = script.index('SUBMISSION_BUNDLE_SOURCE=', start)
+    resolver = script[start:end]
+
+    monorepo = '"$MONOREPO_ROOT/scripts/lib/submission_bundle.py"'
+    bench_local = '"$REPO_ROOT/scripts/lib/submission_bundle.py"'
+    assert resolver.index(monorepo) < resolver.index(bench_local)
+    assert 'if [ -f "$candidate" ]; then' in resolver
+    assert 'if [ -z "$SUBMISSION_BUNDLE_TOOL" ]; then' in resolver
+
+
 def test_baseline_generator_opts_into_reference_diagnostics() -> None:
     script = RUN_BASELINES.read_text()
     assert "KBH_BENCHMARK_BASELINES=1 timeout 300 uv run python benchmark.py" in script

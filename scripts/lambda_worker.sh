@@ -148,6 +148,24 @@ ssh_to() {
   ssh_base "$ip" "$@"
 }
 
+apply_worker_torch_index() {
+  local torch_index="${KB_LAMBDA_TORCH_INDEX:-https://download.pytorch.org/whl/cu128}"
+  ssh_to "$NAME" "cd ~/$REMOTE_DIR && if ! grep -q pytorch-cu128 pyproject.toml 2>/dev/null; then cat >> pyproject.toml <<'TOML'
+
+[[tool.uv.index]]
+name = \"pytorch-cu128\"
+url = \"${torch_index}\"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = \"pytorch-cu128\" }
+TOML
+fi
+rm -f uv.lock
+export PATH=\"\$HOME/.local/bin:\$PATH\"
+uv sync"
+}
+
 # For fire-and-forget remote launches: the detached remote job can keep the ssh
 # channel open past the "launched PID" line (observed 2026-08-01), so bound the
 # local wait instead of blocking on channel close.
@@ -261,19 +279,23 @@ case "$CMD" in
     ensure_reachable "$NAME"
     IP="$(instance_ip "$NAME")"
     echo "[sync] thin $BENCH bench -> ${SSH_USER}@${IP}:$REMOTE_DIR/"
-    # A bootstrapped node's pyproject.toml/uv.lock carry the torch-index patch
-    # (cu128 on Lambda's 570-driver era images); shipping the Mac's cu130 lock
-    # over them breaks every later graded env build (driver-too-old at check
-    # time, found 2026-08-01). Preserve them once the patch marker is present.
+    REMOTE_TORCH_PATCHED=0
+    if ssh_to "$NAME" "grep -q pytorch-cu128 $REMOTE_DIR/pyproject.toml" 2>/dev/null; then
+      REMOTE_TORCH_PATCHED=1
+    fi
+    # Always replace the remote project metadata. The worker patch helper reapplies the
+    # node-specific Torch index and regenerates its lock from these current
+    # dependencies; preserving a patched remote copy can silently omit new
+    # dependencies added by the repository.
     SYNC_EXCLUDES=(--exclude outputs --exclude __pycache__ --exclude '.venv' --exclude '*.pyc'
       --exclude .git --exclude 'docs/refs')
-    if ssh_to "$NAME" "grep -q pytorch-cu128 $REMOTE_DIR/pyproject.toml" 2>/dev/null; then
-      echo "[sync] preserving node torch-index patch (pyproject.toml/uv.lock not shipped)"
-      SYNC_EXCLUDES+=(--exclude /pyproject.toml --exclude /uv.lock)
-    fi
     rsync -az -e "ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$STATE_DIR/known_hosts -o BatchMode=yes" \
       "${SYNC_EXCLUDES[@]}" \
       "$BENCH_DIR/" "${SSH_USER}@${IP}:$REMOTE_DIR/"
+    if [ "$REMOTE_TORCH_PATCHED" = 1 ]; then
+      echo "[sync] reapplying node torch-index patch to current project metadata"
+      apply_worker_torch_index
+    fi
     # The single-GPU benches' run_hard.sh is a thin wrapper over the shared
     # runner at <monorepo>/scripts/lib/; a thin-synced node has no monorepo
     # root, so ship the lib INTO the bench dir (wrapper falls back to it).
@@ -302,18 +324,7 @@ case "$CMD" in
     echo "[bootstrap] uv + torch (agents=$AGENTS)"
     ssh_to "$NAME" 'command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh'
     # Prefer cu128 for driver compatibility (same as brev workers); override with KB_LAMBDA_TORCH_INDEX.
-    TORCH_INDEX="${KB_LAMBDA_TORCH_INDEX:-https://download.pytorch.org/whl/cu128}"
-    ssh_to "$NAME" "cd ~/$REMOTE_DIR && if ! grep -q pytorch-cu128 pyproject.toml 2>/dev/null; then cat >> pyproject.toml <<'TOML'
-
-[[tool.uv.index]]
-name = \"pytorch-cu128\"
-url = \"${TORCH_INDEX}\"
-explicit = true
-
-[tool.uv.sources]
-torch = { index = \"pytorch-cu128\" }
-TOML
-rm -f uv.lock; fi; export PATH=\"\$HOME/.local/bin:\$PATH\"; uv sync"
+    apply_worker_torch_index
     if [ "$AGENTS" = 1 ]; then
       ssh_to "$NAME" 'command -v node >/dev/null 2>&1 || { curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - >/dev/null 2>&1 && sudo apt-get install -y nodejs >/dev/null 2>&1; }
         command -v bwrap >/dev/null 2>&1 || sudo apt-get install -y -qq bubblewrap >/dev/null 2>&1
@@ -355,24 +366,112 @@ rm -f uv.lock; fi; export PATH=\"\$HOME/.local/bin:\$PATH\"; uv sync"
     # the hard workspace.
     [ "$BENCH" = multi ] && { echo "ERROR: use benchmarks/multi/scripts/regrade.py on the worker for multi" >&2; exit 2; }
     NAME="${1:?name}"; RID="${2:?run_id}"; RUNS_DIR="${3:-$BENCH_DIR/outputs/runs-h100}"
+    if [ "${#RID}" -gt 255 ] || \
+       [[ ! "$RID" =~ ^[A-Za-z0-9][A-Za-z0-9._@%+=,-]*$ ]]; then
+      echo "FATAL: unsafe run_id for remote regrade: $RID" >&2
+      exit 3
+    fi
     SRC="$RUNS_DIR/$RID"
-    [ -f "$SRC/solution.py" ] || {
-      echo "no solution.py in $SRC" >&2
-      exit 1
-    }
-    PROBLEM="$(sed -E 's/^[0-9]{8}_[0-9]{6}_.*_([0-9]{2}_[a-z0-9_]+)$/\1/' <<<"$RID")"
+    if RESULT_META="$({ /usr/bin/python3 -I -S - "$SRC/result.json" "$HERE" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[2])
+from scripts.lib.submission_bundle import BundleError, read_regular
+
+try:
+    result = json.loads(read_regular(Path(sys.argv[1]), 1024 * 1024))
+except (BundleError, OSError, UnicodeError, ValueError, RecursionError):
+    raise SystemExit(2)
+if type(result) is not dict:
+    raise SystemExit(2)
+problem = result.get("problem")
+if type(problem) is not str or any(character in problem for character in "\t\r\n"):
+    raise SystemExit(2)
+bundle = any(
+    name in result
+    for name in ("submission_bundle_status", "submission_manifest_sha256")
+)
+digest = ""
+if bundle:
+    digest = result.get("submission_manifest_sha256")
+    if (
+        result.get("submission_bundle_status") != "captured"
+        or type(digest) is not str
+        or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+    ):
+        raise SystemExit(3)
+print("\t".join(("bundle" if bundle else "legacy", problem, digest)))
+PY
+    } 2>/dev/null)"; then
+      IFS=$'\t' read -r RESULT_KIND PROBLEM SUBMISSION_DIGEST <<<"$RESULT_META"
+    else
+      METADATA_STATUS=$?
+      if [ "$METADATA_STATUS" -eq 3 ]; then
+        echo "FATAL: $RID has invalid captured submission bundle metadata; refusing remote regrade" >&2
+      else
+        echo "FATAL: $RID has missing or unreadable result metadata; refusing remote regrade" >&2
+      fi
+      exit 3
+    fi
+    if [ "${#PROBLEM}" -gt 255 ] || \
+       [[ ! "$PROBLEM" =~ ^[0-9]{2}_[a-z0-9]+(_[a-z0-9]+)*$ ]]; then
+      echo "FATAL: unsafe problem for remote regrade: $PROBLEM" >&2
+      exit 3
+    fi
+    if [ "$RESULT_KIND" = "bundle" ]; then
+      if ! /usr/bin/python3 -I -S "$HERE/scripts/lib/submission_bundle.py" \
+          verify "$SRC/submission" --expect "$SUBMISSION_DIGEST" >/dev/null; then
+        echo "FATAL: $RID has an invalid captured submission bundle; refusing remote regrade" >&2
+        exit 3
+      fi
+    else
+      [ -f "$SRC/solution.py" ] || {
+        echo "no solution.py in $SRC" >&2
+        exit 1
+      }
+    fi
     ensure_reachable "$NAME"
     IP="$(instance_ip "$NAME")"
     echo "[regrade] $RID -> $PROBLEMS_ROOT/$PROBLEM"
-    ssh_to "$NAME" "mkdir -p ~/kb-regrade/$RID && cp -r ~/$REMOTE_DIR/$PROBLEMS_ROOT/$PROBLEM/. ~/kb-regrade/$RID/"
+    REMOTE_RUN="kb-regrade/$RID"
+    ssh_to "$NAME" "set -e; \
+      RUN=\"\$HOME/$REMOTE_RUN\"; \
+      BENCH=\"\$HOME/$REMOTE_DIR\"; \
+      TEMPLATE=\"\$BENCH/$PROBLEMS_ROOT/$PROBLEM\"; \
+      rm -rf \"\$RUN\"; mkdir -p \"\$RUN/repo/problems/$PROBLEM\"; \
+      cp -a \"\$BENCH/src\" \"\$RUN/repo/src\"; \
+      for item in pyproject.toml uv.lock .python-version; do cp -p \"\$BENCH/\$item\" \"\$RUN/repo/\$item\"; done; \
+      for item in reference.py sota.py shapes.py problem.yaml check.py benchmark.py PROMPT.txt; do \
+        cp -p \"\$TEMPLATE/\$item\" \"\$RUN/repo/problems/$PROBLEM/\$item\"; \
+      done; \
+      if [ -f \"\$TEMPLATE/baseline.py\" ]; then cp -p \"\$TEMPLATE/baseline.py\" \"\$RUN/repo/problems/$PROBLEM/baseline.py\"; fi"
+    rsync -az \
+      -e "ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$STATE_DIR/known_hosts -o BatchMode=yes" \
+      "$SRC/result.json" "${SSH_USER}@${IP}:$REMOTE_RUN/result.json"
+    if [ "$RESULT_KIND" = "bundle" ]; then
+      rsync -az --delete \
+        -e "ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$STATE_DIR/known_hosts -o BatchMode=yes" \
+        "$SRC/submission/" "${SSH_USER}@${IP}:$REMOTE_RUN/submission/"
+      ssh_to "$NAME" "chmod -R a-w \"\$HOME/$REMOTE_RUN/submission\""
+    else
+      rsync -az -e "ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$STATE_DIR/known_hosts -o BatchMode=yes" \
+        "$SRC/solution.py" "${SSH_USER}@${IP}:$REMOTE_RUN/solution.py"
+      if [ -d "$SRC/scratch" ]; then
+        rsync -az --delete \
+          -e "ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$STATE_DIR/known_hosts -o BatchMode=yes" \
+          "$SRC/scratch/" "${SSH_USER}@${IP}:$REMOTE_RUN/scratch/"
+      fi
+    fi
+    ssh_to "$NAME" "export PATH=\"\$HOME/.local/bin:\$PATH\"; \
+      cd \"\$HOME/$REMOTE_DIR\"; \
+      env KBH_REGRADE_DECK='$PROBLEMS_ROOT' KBH_HARDWARE=${KBH_HARDWARE:-H100} \
+        ./scripts/regrade_sequential.sh \"\$HOME/$REMOTE_RUN\""
     rsync -az -e "ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$STATE_DIR/known_hosts -o BatchMode=yes" \
-      "$SRC/solution.py" "${SSH_USER}@${IP}:kb-regrade/$RID/solution.py"
-    ssh_to "$NAME" "export PATH=\"\$HOME/.local/bin:\$PATH\"; cd ~/kb-regrade/$RID \
-      && echo '--- check.py ---' && uv run --project ~/$REMOTE_DIR python check.py \
-      && echo '--- benchmark.py ---' && env KBH_HARDWARE=${KBH_HARDWARE:-H100} uv run --project ~/$REMOTE_DIR python benchmark.py"
-    rsync -az -e "ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$STATE_DIR/known_hosts -o BatchMode=yes" \
-      "${SSH_USER}@${IP}:kb-regrade/$RID/result.json" "$SRC/result.regrade.json" 2>/dev/null \
-      && echo "  -> $SRC/result.regrade.json" || echo "  (benchmark printed to stdout only)"
+      "${SSH_USER}@${IP}:$REMOTE_RUN/result.json" "$SRC/result.regrade.json"
+    echo "[regrade] updated metadata -> $SRC/result.regrade.json"
     ;;
 
   pull)

@@ -17,9 +17,10 @@ from src.hardware import get as get_hw  # noqa: E402
 def main():
     import reference
     import shapes
-    import solution
 
     meta = yaml.safe_load(Path("problem.yaml").read_text())
+    import solution
+
     hw = get_hw(meta["hardware"][0])
     peak_tflops = hw.peak_tflops_dense.get(meta["peak_tflops_key"], 0.0)
     num_perf_trials = int(meta.get("num_perf_trials", 15))

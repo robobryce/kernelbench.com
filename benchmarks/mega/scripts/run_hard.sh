@@ -144,10 +144,39 @@ mkdir -p "$PROBLEM_DIR"
 RUNS_DIR="$REPO_ROOT/outputs/runs"
 SIB_PARENT="$(dirname "$REPO_ROOT")"   # benchmarks/ on anvil, $HOME on a cloud box
 MONOREPO_ROOT="$(cd "$REPO_ROOT/../.." && pwd)"  # kernelbench.com monorepo root
+SUBMISSION_BUNDLE_TOOL=""
+for candidate in \
+    "$MONOREPO_ROOT/scripts/lib/submission_bundle.py" \
+    "$REPO_ROOT/scripts/lib/submission_bundle.py"; do
+    if [ -f "$candidate" ]; then
+        SUBMISSION_BUNDLE_TOOL="$candidate"
+        break
+    fi
+done
+if [ -z "$SUBMISSION_BUNDLE_TOOL" ]; then
+    echo "STOP: submission bundle helper not found (monorepo or bench-local)" >&2
+    exit 3
+fi
+SUBMISSION_BUNDLE_SOURCE="$(<"$SUBMISSION_BUNDLE_TOOL")"
+run_submission_bundle() {
+    /usr/bin/python3 -I -S -c "$SUBMISSION_BUNDLE_SOURCE" "$@"
+}
+mapfile -t TRUSTED_WORKTREE_ROOTS < <(
+    /usr/bin/git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null \
+        | /usr/bin/sed -n 's/^worktree //p'
+)
+UV_CACHE_HOST="${UV_CACHE_DIR:-$HOME/.cache/uv}"
+AGENT_UV_CACHE="$RUN_DIR/cache/agent_uv"
+/bin/mkdir -p "$UV_CACHE_HOST" "$AGENT_UV_CACHE"
 KBH_EMPTY="$RUN_DIR/.kbh_empty"; : > "$KBH_EMPTY"
 KBH_SBX=()
 if [ "${KBH_SANDBOX:-1}" = "1" ] && command -v bwrap >/dev/null 2>&1; then
-    KBH_SBX=(bwrap --dev-bind / / --tmpfs "$RUNS_DIR")
+    KBH_SBX=(bwrap --dev-bind / /)
+    for trusted_root in "${TRUSTED_WORKTREE_ROOTS[@]}"; do
+        [ -d "$trusted_root" ] && KBH_SBX+=(--ro-bind "$trusted_root" "$trusted_root")
+    done
+    KBH_SBX+=(--ro-bind "$UV_CACHE_HOST" "$UV_CACHE_HOST")
+    KBH_SBX+=(--tmpfs "$RUNS_DIR")
     [ -e "$REPO_ROOT/DEVLOG.md" ] && KBH_SBX+=(--ro-bind "$KBH_EMPTY" "$REPO_ROOT/DEVLOG.md")
     [ -d "$REPO_ROOT/results" ] && KBH_SBX+=(--tmpfs "$REPO_ROOT/results")
     [ -d "$SIB_PARENT/hard" ]     && KBH_SBX+=(--tmpfs "$SIB_PARENT/hard")
@@ -189,20 +218,51 @@ for t in "${TEMPLATE_FILES[@]}"; do
     fi
 done
 TRUSTED_ENTRYPOINT="$RUN_DIR/trusted_entrypoint.py"
-cp -p "$REPO_ROOT/src/eval/trusted_entrypoint.py" "$TRUSTED_ENTRYPOINT"
+TRUSTED_ENTRYPOINT_B64="$(/usr/bin/base64 -w0 "$REPO_ROOT/src/eval/trusted_entrypoint.py")"
+restore_trusted_entrypoint() {
+    /bin/rm -rf -- "$TRUSTED_ENTRYPOINT"
+    printf '%s' "$TRUSTED_ENTRYPOINT_B64" | /usr/bin/base64 -d > "$TRUSTED_ENTRYPOINT"
+    /bin/chmod 0644 "$TRUSTED_ENTRYPOINT"
+}
 
 # --- Per-run GPU/cache isolation -----------------------------------------
 #
 # Agent reasoning and file editing can happen in parallel. CUDA-facing work
 # should be serialized so agent-internal check.py/benchmark.py/profiling runs
 # do not contaminate each other's timing or Torch extension builds.
-REAL_UV="$(command -v uv)"
+REAL_UV="$(readlink -f "$(command -v uv)")"
 REAL_PYTHON="$(command -v python3 || command -v python)"
+TRUSTED_PYTHON="$REPO_ROOT/.venv/bin/python"
+TRUSTED_PYTHON_RUNTIME="$(dirname "$(dirname "$(readlink -f "$TRUSTED_PYTHON")")")"
 REAL_NVIDIA_SMI="$(command -v nvidia-smi || true)"
 REAL_NCU="$(command -v ncu || true)"
 REAL_NSYS="$(command -v nsys || true)"
 REAL_NVCC="$(command -v nvcc || true)"
 REAL_TIMEOUT="$(command -v timeout)"
+REAL_UNSHARE="$(command -v unshare || true)"
+REAL_SETPRIV="$(command -v setpriv || true)"
+if [ ! -x "$TRUSTED_PYTHON" ]; then
+    echo "STOP: canonical grading environment is missing: $TRUSTED_PYTHON" >&2
+    exit 3
+fi
+if [ "${#KBH_SBX[@]}" -gt 0 ]; then
+    KBH_SBX+=(
+        --ro-bind "$TRUSTED_PYTHON_RUNTIME" "$TRUSTED_PYTHON_RUNTIME"
+        --ro-bind "$REAL_UV" "$REAL_UV"
+    )
+fi
+export UV_CACHE_DIR="$AGENT_UV_CACHE"
+
+trusted_path_manifest() {
+    {
+        printf '%s\n' "$REAL_UV" "$TRUSTED_PYTHON_RUNTIME" "$UV_CACHE_HOST"
+        printf '%s\n' "${TRUSTED_WORKTREE_ROOTS[@]}"
+    } | while IFS= read -r path; do
+        [ -n "$path" ] || continue
+        printf '%s\t%s\n' "$path" "$(/usr/bin/stat -Lc '%d:%i:%f' "$path")"
+    done
+}
+TRUSTED_PATH_MANIFEST="$(trusted_path_manifest)"
 REAL_UV_FALLBACK="$REAL_UV"
 REAL_PYTHON_FALLBACK="$REAL_PYTHON"
 LOCK_WRAPPER_DIR="$RUN_DIR/bin"
@@ -289,7 +349,7 @@ fi
     printf '%s start pid=%s cmd=%s\n' "$(date -Is)" "$$" "$name" >&3
     set +e
     export KBH_GPU_LOCK_HELD=1
-    "$real" "$@"
+    "$real" "$@" 3>&- 9>&-
     status=$?
     set -e
     if [ -f "$owner_file" ] && IFS=$'\t' read -r current_owner _ < "$owner_file" && [ "$current_owner" = "$$" ]; then
@@ -301,6 +361,7 @@ fi
 } 3>>"$KBH_GPU_LOCK_LOG" 9>"$KBH_GPU_LOCK"
 EOF
 chmod +x "$LOCK_WRAPPER_DIR/gpu-lock-exec"
+GPU_LOCK_EXEC_SOURCE="$(<"$LOCK_WRAPPER_DIR/gpu-lock-exec")"
 
 cat > "$LOCK_WRAPPER_DIR/uv" <<'EOF'
 #!/bin/bash
@@ -335,11 +396,42 @@ chmod +x "$LOCK_WRAPPER_DIR"/uv "$LOCK_WRAPPER_DIR"/python \
     "$LOCK_WRAPPER_DIR"/ncu "$LOCK_WRAPPER_DIR"/nsys "$LOCK_WRAPPER_DIR"/nvcc
 export PATH="$LOCK_WRAPPER_DIR:$PATH"
 
+if [ -z "$REAL_UNSHARE" ] || [ -z "$REAL_SETPRIV" ]; then
+    echo "STOP: trusted Mega grading requires unshare and setpriv." >&2
+    exit 3
+fi
+GRADE_ISOLATION_SOURCE='home=$1
+problem=$2
+torch_cache=$3
+triton_cache=$4
+cuda_cache=$5
+tmp=$6
+setpriv=$7
+shift 7
+/usr/bin/mount --bind "$home" "$home"
+/usr/bin/mount -o remount,bind,ro "$home"
+for path in "$problem" "$torch_cache" "$triton_cache" "$cuda_cache" "$tmp"; do
+    /usr/bin/mount --bind "$path" "$path"
+    /usr/bin/mount -o remount,bind,rw "$path"
+done
+cd "$problem"
+exec "$setpriv" --no-new-privs --bounding-set=-all \
+    --inh-caps=-all --ambient-caps=-all "$@"
+'
+GRADE_COMMAND=(
+    "$REAL_UNSHARE" --user --map-root-user --net --mount --pid --fork
+    --kill-child=KILL --mount-proc --propagation private /bin/sh -eu -c
+    "$GRADE_ISOLATION_SOURCE" mega-grade "$HOME" "$PROBLEM_DIR"
+    "$RUN_DIR/cache/torch_extensions" "$RUN_DIR/cache/triton"
+    "$RUN_DIR/cache/cuda" "$RUN_DIR/tmp" "$REAL_SETPRIV"
+)
+
 run_gpu_locked_timeout() {
     local lock_name="$1"
     local timeout_seconds="$2"
     shift 2
-    "$RUN_DIR/bin/gpu-lock-exec" "$lock_name" "$REAL_TIMEOUT" "$timeout_seconds" "$@"
+    PATH=/usr/bin:/bin /bin/bash -c "$GPU_LOCK_EXEC_SOURCE" gpu-lock-exec \
+        "$lock_name" "$REAL_TIMEOUT" "$timeout_seconds" "$@"
 }
 
 # Snapshot immutable problem files. Agents may make a mess in the problem
@@ -353,12 +445,49 @@ for t in "${TEMPLATE_FILES[@]}"; do
     fi
 done
 
+trusted_tree_digest() {
+    /usr/bin/python3 -I -S - "$1" <<'PY'
+import hashlib
+import stat
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+if not stat.S_ISDIR(root.lstat().st_mode):
+    raise SystemExit(f"unsafe trusted root: {root}")
+digest = hashlib.sha256()
+for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
+    relative = path.relative_to(root).as_posix()
+    metadata = path.lstat()
+    if "__pycache__" in path.parts or path.suffix == ".pyc":
+        continue
+    if stat.S_ISDIR(metadata.st_mode):
+        kind, contents = b"d", b""
+    elif stat.S_ISREG(metadata.st_mode):
+        kind, contents = b"f", path.read_bytes()
+    else:
+        raise SystemExit(f"unsafe trusted entry: {relative}")
+    digest.update(kind + relative.encode() + b"\0")
+    digest.update(hashlib.sha256(contents).digest())
+print(digest.hexdigest())
+PY
+}
+TRUSTED_SRC_DIGEST="$(trusted_tree_digest "$REPO_ROOT/src")"
+TEMPLATE_BACKUP_DIGEST="$(trusted_tree_digest "$TEMPLATE_BACKUP_DIR")"
+
 TEMPLATE_MUTATED=false
 
 detect_template_mutation() {
     local phase="$1"
     local found=0
     local log="$RUN_DIR/template_mutations.log"
+    if [ "$(trusted_tree_digest "$TEMPLATE_BACKUP_DIR" 2>/dev/null || true)" \
+        != "$TEMPLATE_BACKUP_DIGEST" ] || \
+        [ "$(trusted_tree_digest "$REPO_ROOT/src" 2>/dev/null || true)" \
+        != "$TRUSTED_SRC_DIGEST" ]; then
+        printf 'phase: %s\nMUTATED: trusted grading assets\n' "$phase" >> "$log"
+        found=1
+    fi
     for t in "${TEMPLATE_FILES[@]}"; do
         local orig="$TEMPLATE_BACKUP_DIR/$t"
         local cur="$PROBLEM_DIR/$t"
@@ -389,6 +518,11 @@ detect_template_mutation() {
 }
 
 restore_template_files() {
+    if [ "$(trusted_tree_digest "$TEMPLATE_BACKUP_DIR" 2>/dev/null || true)" \
+        != "$TEMPLATE_BACKUP_DIGEST" ]; then
+        echo "STOP: trusted problem backup changed during the agent session" >&2
+        exit 3
+    fi
     for t in "${TEMPLATE_FILES[@]}"; do
         local orig="$TEMPLATE_BACKUP_DIR/$t"
         local cur="$PROBLEM_DIR/$t"
@@ -1113,6 +1247,30 @@ JSON
         ;;
 esac
 
+export PATH="$KBH_CUDA_HOME/bin:/usr/local/bin:/usr/bin:/bin"
+if [ "$(trusted_path_manifest)" != "$TRUSTED_PATH_MANIFEST" ]; then
+    echo "STOP: agent replaced a trusted runtime, cache, or worktree path." >&2
+    exit 3
+fi
+/bin/rm -f -- "${KBH_GPU_LOCK}.owner"
+for trusted_log in "$LOG_FILE" "$STDERR_FILE"; do
+    if [ -L "$trusted_log" ] || [ ! -f "$trusted_log" ] || \
+        [ "$(/usr/bin/stat -c %h "$trusted_log")" -ne 1 ]; then
+        echo "STOP: agent replaced a trusted run log: $trusted_log" >&2
+        exit 3
+    fi
+done
+for reserved_name in submission submission.log check.log benchmark.log \
+    result.json solution.py scratch replay_candidate_check \
+    replay_candidate_benchmark; do
+    reserved_path="$RUN_DIR/$reserved_name"
+    if [ -e "$reserved_path" ] || [ -L "$reserved_path" ]; then
+        echo "STOP: agent created reserved run path: $reserved_name" >&2
+        exit 3
+    fi
+done
+restore_trusted_entrypoint
+
 HARNESS_END_TIME=$(date +%s)
 HARNESS_FINISHED_AT="$(date -Is)"
 ELAPSED=$((HARNESS_END_TIME - START_TIME))
@@ -1176,6 +1334,30 @@ fi
 HAS_SOLUTION=false
 CORRECT=false
 SCORE="null"
+SUBMISSION_BUNDLE_STATUS="missing"
+SUBMISSION_BUNDLE_VALID=false
+SUBMISSION_DIGEST=""
+BUNDLE_DIR="$RUN_DIR/submission"
+
+restore_candidate_from_bundle() {
+    local stage_name="$1"
+    local extraction="$RUN_DIR/replay_candidate_$stage_name"
+    local f base
+    if ! run_submission_bundle extract \
+        "$BUNDLE_DIR" "$extraction" --expect "$SUBMISSION_DIGEST" >/dev/null; then
+        return 1
+    fi
+    shopt -s nullglob dotglob
+    for f in "$PROBLEM_DIR"/*; do
+        base="$(basename "$f")"
+        if ! is_template "$base"; then
+            /bin/rm -rf -- "$f"
+        fi
+    done
+    shopt -u nullglob dotglob
+    /bin/cp -a "$extraction"/. "$PROBLEM_DIR"/
+    /bin/rm -rf -- "$extraction"
+}
 
 if ! detect_template_mutation "after harness"; then
     TEMPLATE_MUTATED=true
@@ -1184,8 +1366,30 @@ if ! detect_template_mutation "after harness"; then
 fi
 strip_python_bytecode "$PROBLEM_DIR"
 
-if [ -f "$PROBLEM_DIR/solution.py" ]; then
-    HAS_SOLUTION=true
+if [ -e "$PROBLEM_DIR/solution.py" ] || [ -L "$PROBLEM_DIR/solution.py" ]; then
+    CAPTURE_ARGS=()
+    for t in "${TEMPLATE_FILES[@]}"; do
+        CAPTURE_ARGS+=(--exclude "$t")
+        if [[ "$t" == *.py ]]; then
+            CAPTURE_ARGS+=(--reserved-module "${t%.py}")
+        fi
+    done
+    CAPTURE_ARGS+=(--exclude .venv --exclude framework.txt --reserved-module src)
+    if SUBMISSION_DIGEST="$(
+        run_submission_bundle capture \
+            "$PROBLEM_DIR" "$BUNDLE_DIR" "${CAPTURE_ARGS[@]}"
+    )" 2> "$RUN_DIR/submission.log"; then
+        HAS_SOLUTION=true
+        SUBMISSION_BUNDLE_STATUS="captured"
+        SUBMISSION_BUNDLE_VALID=true
+        if ! restore_candidate_from_bundle check; then
+            HAS_SOLUTION=false
+            SUBMISSION_BUNDLE_STATUS="modified"
+            SUBMISSION_BUNDLE_VALID=false
+        fi
+    else
+        SUBMISSION_BUNDLE_STATUS="rejected"
+    fi
 fi
 
 if [ "$TEMPLATE_MUTATED" = "false" ] && [ "$HAS_SOLUTION" = "true" ]; then
@@ -1193,10 +1397,12 @@ if [ "$TEMPLATE_MUTATED" = "false" ] && [ "$HAS_SOLUTION" = "true" ]; then
     BENCH_LOG="$RUN_DIR/benchmark.log"
 
     echo "Running check.py..."
+    restore_trusted_entrypoint
     CHECK_START_TIME=$(date +%s)
     CHECK_EXIT_CODE=0
     (cd "$PROBLEM_DIR" && run_gpu_locked_timeout check.py "$CHECK_TIMEOUT_SECONDS" \
-        uv run python "$TRUSTED_ENTRYPOINT" check.py) > "$CHECK_LOG" 2>&1 || CHECK_EXIT_CODE=$?
+        "${GRADE_COMMAND[@]}" "$TRUSTED_PYTHON" -I \
+        "$TRUSTED_ENTRYPOINT" check.py) > "$CHECK_LOG" 2>&1 || CHECK_EXIT_CODE=$?
     CHECK_END_TIME=$(date +%s)
     CHECK_ELAPSED=$((CHECK_END_TIME - CHECK_START_TIME))
     CHECK_PASS_COUNT=$(grep -axc 'PASS' "$CHECK_LOG" || true)
@@ -1210,16 +1416,25 @@ if [ "$TEMPLATE_MUTATED" = "false" ] && [ "$HAS_SOLUTION" = "true" ]; then
     elif [ "$CHECK_EXIT_CODE" -eq 0 ] && [ "$CHECK_PASS_COUNT" -eq 1 ]; then
         # The trusted entrypoint only returns zero if checker execution reaches
         # normal fallthrough; candidate SystemExit(0) is a failure.
-        strip_python_bytecode "$PROBLEM_DIR"
-        CORRECT=true
-        echo "Running benchmark.py..."
+        if ! restore_candidate_from_bundle benchmark; then
+            SUBMISSION_BUNDLE_STATUS="modified"
+            SUBMISSION_BUNDLE_VALID=false
+            CORRECT=false
+            SCORE="null"
+            echo "FAIL: captured submission changed during check.py."
+        else
+            restore_trusted_entrypoint
+            strip_python_bytecode "$PROBLEM_DIR"
+            CORRECT=true
+            echo "Running benchmark.py..."
         # Some problems (KDA chunked recurrence, sonic-MoE)
         # have references that loop in Python, so 20 perf trials × 4 variants ×
         # 5 shapes can take 5-10 min. Generous budget.
         BENCH_START_TIME=$(date +%s)
         BENCH_EXIT_CODE=0
-        (cd "$PROBLEM_DIR" && run_gpu_locked_timeout benchmark.py "$BENCHMARK_TIMEOUT_SECONDS" \
-            uv run python "$TRUSTED_ENTRYPOINT" benchmark.py) > "$BENCH_LOG" 2>&1 || BENCH_EXIT_CODE=$?
+            (cd "$PROBLEM_DIR" && run_gpu_locked_timeout benchmark.py "$BENCHMARK_TIMEOUT_SECONDS" \
+                "${GRADE_COMMAND[@]}" "$TRUSTED_PYTHON" -I \
+                "$TRUSTED_ENTRYPOINT" benchmark.py) > "$BENCH_LOG" 2>&1 || BENCH_EXIT_CODE=$?
         BENCH_END_TIME=$(date +%s)
         BENCH_ELAPSED=$((BENCH_END_TIME - BENCH_START_TIME))
         if ! detect_template_mutation "after benchmark.py"; then
@@ -1238,9 +1453,10 @@ if [ "$TEMPLATE_MUTATED" = "false" ] && [ "$HAS_SOLUTION" = "true" ]; then
                 SCORE="null"
                 echo "FAIL: benchmark.py emitted $BENCH_METRIC_COUNT complete score markers."
             fi
-        else
-            SCORE="null"
-            echo "FAIL: benchmark.py did not complete successfully (exit $BENCH_EXIT_CODE)."
+            else
+                SCORE="null"
+                echo "FAIL: benchmark.py did not complete successfully (exit $BENCH_EXIT_CODE)."
+            fi
         fi
     fi
 fi
@@ -1249,6 +1465,18 @@ CHECK_ELAPSED="${CHECK_ELAPSED:-null}"
 BENCH_ELAPSED="${BENCH_ELAPSED:-null}"
 CHECK_EXIT_CODE="${CHECK_EXIT_CODE:-null}"
 BENCH_EXIT_CODE="${BENCH_EXIT_CODE:-null}"
+
+if [ "$SUBMISSION_BUNDLE_VALID" = "true" ]; then
+    if ! run_submission_bundle project \
+        "$BUNDLE_DIR" "$RUN_DIR" --expect "$SUBMISSION_DIGEST" \
+        --reports-from "$PROBLEM_DIR" >> "$RUN_DIR/submission.log" 2>&1; then
+        SUBMISSION_BUNDLE_STATUS="modified"
+        SUBMISSION_BUNDLE_VALID=false
+        CORRECT=false
+        SCORE="null"
+    fi
+fi
+
 FINISH_TIME=$(date +%s)
 FINISHED_AT="$(date -Is)"
 TOTAL_ELAPSED=$((FINISH_TIME - START_TIME))
@@ -1257,10 +1485,10 @@ TOTAL_ELAPSED=$((FINISH_TIME - START_TIME))
 # count for cost comparison even when the harness uses a coding-plan billing
 # (which hides per-call USD).
 USAGE_JSON="$(
-    KBH_GPU_LOCK_HELD=1 uv run --quiet python \
+    "$TRUSTED_PYTHON" -I \
         "$REPO_ROOT/scripts/extract_usage.py" "$RUN_DIR" "$HARNESS" 2>/dev/null || echo '{}'
 )"
-OUTPUT_TOKENS_PER_SECOND="$(USAGE_JSON="$USAGE_JSON" ELAPSED="$ELAPSED" KBH_GPU_LOCK_HELD=1 uv run --quiet python - <<'PY'
+OUTPUT_TOKENS_PER_SECOND="$(USAGE_JSON="$USAGE_JSON" ELAPSED="$ELAPSED" "$TRUSTED_PYTHON" -I - <<'PY'
 import json
 import os
 
@@ -1289,20 +1517,26 @@ CLASSIFICATION_JSON="$(
     LOG_FILE="$LOG_FILE" \
     STDERR_FILE="$STDERR_FILE" \
     MIN_USEFUL_OUTPUT_TOKENS="$MIN_USEFUL_OUTPUT_TOKENS" \
-    KBH_GPU_LOCK_HELD=1 uv run --quiet python scripts/classify_run.py
+    "$TRUSTED_PYTHON" -I "$REPO_ROOT/scripts/classify_run.py"
 )"
-FAILURE_REASON="$(CLASSIFICATION_JSON="$CLASSIFICATION_JSON" KBH_GPU_LOCK_HELD=1 uv run --quiet python - <<'PY'
+FAILURE_REASON="$(CLASSIFICATION_JSON="$CLASSIFICATION_JSON" "$TRUSTED_PYTHON" -I - <<'PY'
 import json
 import os
 print(json.loads(os.environ["CLASSIFICATION_JSON"])["failure_reason"])
 PY
 )"
-RETRYABLE_INFRA_FAILURE="$(CLASSIFICATION_JSON="$CLASSIFICATION_JSON" KBH_GPU_LOCK_HELD=1 uv run --quiet python - <<'PY'
+RETRYABLE_INFRA_FAILURE="$(CLASSIFICATION_JSON="$CLASSIFICATION_JSON" "$TRUSTED_PYTHON" -I - <<'PY'
 import json
 import os
 print("true" if json.loads(os.environ["CLASSIFICATION_JSON"])["retryable_infra_failure"] else "false")
 PY
 )"
+
+if [ -n "$SUBMISSION_DIGEST" ]; then
+    SUBMISSION_DIGEST_JSON="\"$SUBMISSION_DIGEST\""
+else
+    SUBMISSION_DIGEST_JSON="null"
+fi
 
 cat > "$RUN_DIR/result.json" <<JSON
 {
@@ -1325,6 +1559,8 @@ cat > "$RUN_DIR/result.json" <<JSON
     "minimum_useful_output_tokens": $MIN_USEFUL_OUTPUT_TOKENS,
     "peak_fraction": $SCORE,
     "template_mutated": $TEMPLATE_MUTATED,
+    "submission_bundle_status": "$SUBMISSION_BUNDLE_STATUS",
+    "submission_manifest_sha256": $SUBMISSION_DIGEST_JSON,
     "elapsed_seconds": $ELAPSED,
     "total_elapsed_seconds": $TOTAL_ELAPSED,
     "check_elapsed_seconds": $CHECK_ELAPSED,
@@ -1341,26 +1577,6 @@ cat > "$RUN_DIR/result.json" <<JSON
     "usage": $USAGE_JSON
 }
 JSON
-
-# Archive solution + any scratch
-if [ -f "$PROBLEM_DIR/solution.py" ]; then
-    cp "$PROBLEM_DIR/solution.py" "$RUN_DIR/solution.py"
-fi
-
-SCRATCH_DIR="$RUN_DIR/scratch"
-shopt -s nullglob dotglob
-for f in "$PROBLEM_DIR"/*; do
-    base="$(basename "$f")"
-    [[ "$base" == "." || "$base" == ".." ]] && continue
-    [[ "$base" == "solution.py" ]] && continue
-    # Never archive a per-run venv into scratch (multi-GB CUDA wheels).
-    [[ "$base" == ".venv" ]] && continue
-    if ! is_template "$base"; then
-        mkdir -p "$SCRATCH_DIR"
-        cp -r "$f" "$SCRATCH_DIR/"
-    fi
-done
-shopt -u nullglob dotglob
 
 # Clean the problem workspace for the next run
 shopt -s nullglob dotglob

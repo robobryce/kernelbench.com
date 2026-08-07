@@ -27,7 +27,6 @@ from src.eval.numeric_stress import (  # noqa: E402
 def main():
     try:
         import reference
-        import solution
     except Exception as e:
         print(f"FAIL: import error: {e}")
         sys.exit(1)
@@ -51,6 +50,12 @@ def main():
         f"cuda_language: ok framework={report['framework']} "
         f"evidence={','.join(report['cuda_evidence']) or 'none'}"
     )
+
+    try:
+        import solution
+    except Exception as e:
+        print(f"FAIL: solution import error: {e}")
+        sys.exit(1)
 
     device = torch.device("cuda:0")
     tol = meta.get("tolerance") or {"bfloat16": 5.0e-2}

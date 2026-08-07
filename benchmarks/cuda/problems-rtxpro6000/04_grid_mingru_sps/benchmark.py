@@ -18,9 +18,10 @@ sys.path.insert(0, str(REPO_ROOT))
 def main():
     import reference
     import shapes
-    import solution
 
     meta = yaml.safe_load(Path("problem.yaml").read_text())
+    import solution
+
     peak_sps = float(meta.get("peak_sps", 5e7))
     num_perf_trials = int(meta.get("num_perf_trials", 3))
 

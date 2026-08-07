@@ -35,9 +35,10 @@ def _time_run(steps: int, seed: int):
 
 def main() -> None:
     import shapes
-    import solution  # noqa: F401  (imported lazily in _time_run too)
 
     meta = yaml.safe_load(Path("problem.yaml").read_text())
+    import solution  # noqa: F401  (imported lazily in _time_run too)
+
     peak_sps = float(meta["peak_sps"])
     floor = float(meta.get("benchmark_return_floor", 0.0))
     steps = int(shapes.TOTAL_ENV_STEPS)

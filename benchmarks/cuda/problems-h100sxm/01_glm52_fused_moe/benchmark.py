@@ -17,9 +17,10 @@ from src.hardware import get as get_hw  # noqa: E402
 def main():
     import reference
     import shapes
-    import solution
 
     meta = yaml.safe_load(Path("problem.yaml").read_text())
+    import solution
+
     hw = get_hw(meta["hardware"][0])
     peak_tflops = hw.peak_tflops_dense.get(meta["peak_tflops_key"], 0.0)
     peak_gbps = hw.peak_bandwidth_gb_s
@@ -50,9 +51,18 @@ def main():
         T = shape["T"]
         top_k = shape["top_k"]
         n_shared = shape["n_shared"]
-        H, I, E = shape["H"], shape["I"], shape["E"]
-        flops = float(T * (n_shared + top_k) * (4 * H * I + 2 * I * H))
-        bytes_moved = float(T * H * 2 * 2 + (E + n_shared) * (2 * I * H + H * I) * 2)
+        hidden, intermediate, experts = shape["H"], shape["I"], shape["E"]
+        flops = float(
+            T
+            * (n_shared + top_k)
+            * (4 * hidden * intermediate + 2 * intermediate * hidden)
+        )
+        bytes_moved = float(
+            T * hidden * 2 * 2
+            + (experts + n_shared)
+            * (2 * intermediate * hidden + hidden * intermediate)
+            * 2
+        )
 
         ms_sol = time_variant(
             sol_model, inputs, shape_idx=shape_idx, variant="solution", iters=num_perf_trials

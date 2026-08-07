@@ -267,6 +267,8 @@ def check_tensor_properties(
 ) -> int:
     """Compare tensor outputs for generated structural cases."""
 
+    actual_seed, property_cases, replay_case = _resolve_property_plan(problem_name, cases)
+
     # Candidate warmup runs before the same-storage probe so CUDA graphs and
     # pointer-keyed paths are hot. Preserve a trusted copy first: a candidate
     # must not be able to poison the inputs during warmup and thereby choose
@@ -308,22 +310,19 @@ def check_tensor_properties(
     prime_replay_state(solution_model, base_inputs)
     _assert_input_metadata_unchanged(base_inputs, pristine_metadata)
     _overwrite_inputs_without_version(base_inputs, pristine_inputs)
-    canonical = canonical_property_case(problem_name)
     same_storage_inputs = list(base_inputs)
-    mutated = apply_property_case(problem_name, pristine_inputs, canonical)
+    mutated = apply_property_case(problem_name, pristine_inputs, replay_case)
     _overwrite_inputs_without_version(same_storage_inputs, mutated)
     try:
-        verify(canonical, _clone_inputs(mutated), same_storage_inputs)
+        verify(replay_case, _clone_inputs(mutated), same_storage_inputs)
     finally:
-        # Generated cases must start from the nominal distribution, not from a
-        # canonical mutation compounded a second time.
+        # Planned cases must start from the nominal distribution, not from the
+        # secret replay mutation compounded a second time.
         _overwrite_inputs_without_version(same_storage_inputs, pristine_inputs)
 
-    if cases is None:
-        return run_property_cases(problem_name, check)
-    for case in cases:
+    for case in property_cases:
         check(case)
-    return 0
+    return actual_seed
 
 
 def check_topk_properties(
@@ -336,6 +335,9 @@ def check_topk_properties(
     cases: Sequence[PropertyCase] | None = None,
 ) -> int:
     """Check clustered values after warming any pointer-specific replay state."""
+    actual_seed, property_cases, replay_case = _resolve_property_plan(
+        "05_topk_bitonic", cases
+    )
     pristine_inputs = _clone_inputs(base_inputs)
     pristine_metadata = _input_metadata(base_inputs)
     prime_replay_state(solution_model, base_inputs)
@@ -404,22 +406,47 @@ def check_topk_properties(
         verify(case, _clone_inputs(inputs), _clone_inputs(inputs))
 
     # First preserve the warmed pointer and version while changing its contents
-    # in place. Then generated checks use fresh storage. Real CUDA-graph replay
-    # recomputes; pointer/version-keyed output memoization does not.
-    canonical = canonical_property_case("05_topk_bitonic")
+    # to a seed-dependent case which candidate code has not seen. Then planned
+    # checks use fresh storage. Real CUDA-graph replay recomputes;
+    # pointer/version-keyed output memoization does not.
     same_storage_inputs = list(base_inputs)
-    mutated = apply_property_case("05_topk_bitonic", pristine_inputs, canonical)
+    mutated = apply_property_case("05_topk_bitonic", pristine_inputs, replay_case)
     _overwrite_inputs_without_version(same_storage_inputs, mutated)
     try:
-        verify(canonical, _clone_inputs(mutated), same_storage_inputs)
+        verify(replay_case, _clone_inputs(mutated), same_storage_inputs)
     finally:
         _overwrite_inputs_without_version(same_storage_inputs, pristine_inputs)
 
-    if cases is None:
-        return run_property_cases("05_topk_bitonic", check)
-    for case in cases:
+    for case in property_cases:
         check(case)
-    return 0
+    return actual_seed
+
+
+def _resolve_property_plan(
+    problem_name: str,
+    cases: Sequence[PropertyCase] | None,
+) -> tuple[int, tuple[PropertyCase, ...], PropertyCase]:
+    """Return a frozen plan and its seed-dependent same-storage case."""
+    if cases is None:
+        actual_seed, property_cases = generate_property_cases(problem_name)
+    else:
+        actual_seed = 0
+        property_cases = tuple(cases)
+
+    canonical = canonical_property_case(problem_name)
+    # Hypothesis emits the fixed @example first and the seeded examples after
+    # it. Prefer the last distinct case: unlike both the fixed regression and
+    # the strategy's simplest example, it changes with the private run seed.
+    replay_case = next(
+        (case for case in reversed(property_cases) if case != canonical),
+        None,
+    )
+    if replay_case is None:
+        raise ValueError(
+            f"property plan for {problem_name!r} must include a generated "
+            "noncanonical case for same-storage replay"
+        )
+    return actual_seed, property_cases, replay_case
 
 
 def _tensor(value: object, index: int) -> torch.Tensor:

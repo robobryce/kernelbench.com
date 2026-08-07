@@ -30,11 +30,11 @@ def _run(model, cfg, ctx, steps, seed, ref):
     return h
 
 
-def _time(model, cfg, ctx, steps, seed, ref):
+def _time(model, cfg, ctx, steps, seed, ref, num_perf_trials):
     _run(model, cfg, ctx, min(3, steps), seed, ref)   # warmup
     torch.cuda.synchronize()
     best = float("inf")
-    for _ in range(int(yaml.safe_load(Path("problem.yaml").read_text()).get("num_perf_trials", 3))):
+    for _ in range(num_perf_trials):
         t0 = time.perf_counter()
         h = _run(model, cfg, ctx, steps, seed, ref)
         best = min(best, time.perf_counter() - t0)
@@ -45,10 +45,12 @@ def main() -> None:
     import baseline
     import reference as ref
     import shapes
-    import solution
     import torch.nn.functional as F
     meta = yaml.safe_load(Path("problem.yaml").read_text())
+    import solution
+
     thr = float(meta["tolerance"]["cos_sim"])
+    num_perf_trials = int(meta.get("num_perf_trials", 3))
     device = torch.device("cuda:0")
     speedups = []
 
@@ -75,8 +77,8 @@ def main() -> None:
             print("RESULT: LOW")
             return
 
-        sol_ms, _ = _time(sol_model, cfg, ctx, steps, 7, ref)
-        base_ms, _ = _time(base_model, cfg, ctx, steps, 7, ref)
+        sol_ms, _ = _time(sol_model, cfg, ctx, steps, 7, ref, num_perf_trials)
+        base_ms, _ = _time(base_model, cfg, ctx, steps, 7, ref, num_perf_trials)
         speedup = base_ms / sol_ms if sol_ms > 0 else 0.0
         speedups.append(speedup)
         print(

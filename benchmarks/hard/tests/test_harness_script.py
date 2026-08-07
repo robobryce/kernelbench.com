@@ -28,9 +28,8 @@ def test_post_run_timeout_starts_inside_gpu_lock() -> None:
 
 def test_scoring_environment_links_cuda_runtime_for_extensions() -> None:
     script = RUN_HARD.read_text()
-    assert '(cd "$WORKSPACE_ROOT" && uv sync --frozen)' in script
-    assert 'WORKSPACE_CUDA_LIB="$WORKSPACE_ROOT/.venv/lib/python3.11/site-packages/nvidia/cu13/lib"' in script
-    assert 'ln -s libcudart.so.13 "$WORKSPACE_CUDA_LIB/libcudart.so"' in script
+    assert 'TRUSTED_CUDA_LIB="$TRUSTED_SITE_PACKAGES/nvidia/cu13/lib"' in script
+    assert 'ln -s libcudart.so.13 "$TRUSTED_CUDA_LIB/libcudart.so"' in script
 
 
 def test_cuda_cannot_be_disabled_for_agent_phase() -> None:
@@ -165,7 +164,7 @@ def test_shared_checker_source_is_copied_and_restored_as_trusted_input() -> None
     assert 'TRUSTED_SRC_BACKUP_DIR="$RUN_DIR/trusted_src"' in script
     assert "MUTATED: trusted src/" in script
     assert 'TRUSTED_SRC_DIGEST="$(trusted_src_digest' in script
-    assert '"$REAL_PYTHON" - "$1"' in script
+    assert '"$BUNDLE_PYTHON" -I -S - "$1"' in script
     assert "unsafe trusted src root" in script
     assert "BOOTSTRAP_PYTHON" not in script
     assert script.index('REAL_PYTHON="$(command -v') < script.index(
@@ -174,7 +173,7 @@ def test_shared_checker_source_is_copied_and_restored_as_trusted_input() -> None
     assert 'strip_python_bytecode "$WORKSPACE_ROOT/src"' in script
     assert '/bin/cp -a "$trusted_source" "$WORKSPACE_ROOT/src"' in script
     after_harness = script.index('detect_template_mutation "after harness"')
-    final_check = script.index('echo "Running check.py..."', after_harness)
+    final_check = script.index('echo "Running check.py from captured submission..."', after_harness)
     assert script.index("restore_trusted_src", after_harness, final_check) < final_check
 
 
@@ -260,9 +259,11 @@ def test_legacy_regrade_receives_current_property_helper_and_lock(tmp_path) -> N
 def test_regrade_purges_problem_bytecode_after_candidate_restore() -> None:
     script = REGRADE.read_text()
     scratch_restore = script.index('cp -r "$RUN_DIR/scratch/." "$PROBLEM_DIR/"')
-    check_run = script.index('uv run python "$TRUSTED_ENTRYPOINT" check.py', scratch_restore)
+    check_run = script.index('uv run python -I "$TRUSTED_ENTRYPOINT" check.py', scratch_restore)
     first_purge = script.index('purge_untrusted_bytecode "$PROBLEM_DIR"', scratch_restore)
-    benchmark_run = script.index('uv run python "$TRUSTED_ENTRYPOINT" benchmark.py', check_run)
+    benchmark_run = script.index(
+        'uv run python -I "$TRUSTED_ENTRYPOINT" benchmark.py', check_run
+    )
     second_purge = script.index('purge_untrusted_bytecode "$PROBLEM_DIR"', check_run)
     assert scratch_restore < first_purge < check_run < second_purge < benchmark_run
 
@@ -275,7 +276,7 @@ def test_regrade_purges_problem_bytecode_after_candidate_restore() -> None:
 
     mini = (monorepo / "benchmarks" / "mini" / "scripts" / "regrade_sequential.sh").read_text()
     mini_scratch = mini.index('cp -r "$RUN_DIR/scratch/." "$PROBLEM_DIR/"')
-    mini_check = mini.index('uv run python "$TRUSTED_ENTRYPOINT" check.py', mini_scratch)
+    mini_check = mini.index('uv run python -I "$TRUSTED_ENTRYPOINT" check.py', mini_scratch)
     assert mini_scratch < mini.index(
         'purge_untrusted_bytecode "$PROBLEM_DIR"', mini_scratch
     ) < mini_check
@@ -433,9 +434,10 @@ def test_hy3_tokenhub_uses_measured_context_wall_and_host_stall_watch() -> None:
 def test_agent_container_sessions_parallel_with_per_command_lock() -> None:
     script = RUN_HARD.read_text()
     # Default: sessions do NOT hold the GPU lock; in-container GPU commands
-    # serialize per-command through the bind-mounted lock dir.
+    # serialize per-command through the bind-mounted lock file.
     assert script.count("-v \"$CONTAINER_LOCK_BIN:/kbh/bin:ro\"") == 6
-    assert script.count("-v \"$KBH_GPU_LOCK_DIR:/kbh/lock:rw\"") == 6
+    assert script.count("-v \"$KBH_GPU_LOCK:/kbh/lock/gpu.lock:rw\"") == 6
+    assert script.count("-e KBH_GPU_LOCK_OWNER=/home/agent/gpu_lock.owner") == 6
     assert script.count("-e KBH_GPU_LOCK=/kbh/lock/gpu.lock") == 6
     assert "KBH_AGENT_CONTAINER_SESSION_LOCK" in script
     assert "agent_container_native_profiling_path_wrapper_gpu_lock" in script
