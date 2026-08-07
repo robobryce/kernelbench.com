@@ -22,6 +22,13 @@ def test_post_run_timeout_starts_inside_gpu_lock() -> None:
     assert "timeout 1800 uv run python benchmark.py" not in script
 
 
+def test_scoring_environment_links_cuda_runtime_for_extensions() -> None:
+    script = RUN_HARD.read_text()
+    assert '(cd "$WORKSPACE_ROOT" && uv sync --frozen)' in script
+    assert 'WORKSPACE_CUDA_LIB="$WORKSPACE_ROOT/.venv/lib/python3.11/site-packages/nvidia/cu13/lib"' in script
+    assert 'ln -s libcudart.so.13 "$WORKSPACE_CUDA_LIB/libcudart.so"' in script
+
+
 def test_cuda_cannot_be_disabled_for_agent_phase() -> None:
     script = RUN_HARD.read_text()
     parallel = LAUNCH_PARALLEL.read_text()

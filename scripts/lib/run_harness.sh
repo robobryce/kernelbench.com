@@ -2611,6 +2611,14 @@ if [ "$TEMPLATE_MUTATED" = "false" ] && [ "$HAS_SOLUTION" = "true" ]; then
     CHECK_LOG="$RUN_DIR/check.log"
     BENCH_LOG="$RUN_DIR/benchmark.log"
 
+    # Materialize the scoring environment before fixing CUDA's linker name.
+    # The CUDA wheel ships libcudart.so.13 but torch extensions use -lcudart.
+    (cd "$WORKSPACE_ROOT" && uv sync --frozen)
+    WORKSPACE_CUDA_LIB="$WORKSPACE_ROOT/.venv/lib/python3.11/site-packages/nvidia/cu13/lib"
+    if [ -f "$WORKSPACE_CUDA_LIB/libcudart.so.13" ] && [ ! -e "$WORKSPACE_CUDA_LIB/libcudart.so" ]; then
+        ln -s libcudart.so.13 "$WORKSPACE_CUDA_LIB/libcudart.so"
+    fi
+
     echo "Running check.py..."
     CHECK_START_TIME=$(date +%s)
     CHECK_EXIT_CODE=0
