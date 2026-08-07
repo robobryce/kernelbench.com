@@ -58,7 +58,7 @@ def run_path(value: str) -> Path:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Plot per-dialect scores and token efficiency for two or more runs."
+        description="Plot per-dialect scores and token efficiency for one or more runs."
     )
     parser.add_argument(
         "runs",
@@ -67,10 +67,7 @@ def parse_args() -> argparse.Namespace:
         type=run_path,
         help="run directory containing a waves/ subdirectory",
     )
-    args = parser.parse_args()
-    if len(args.runs) < 2:
-        parser.error("at least two run directories are required")
-    return args
+    return parser.parse_args()
 
 
 def load_run_results(root: Path) -> dict[tuple[str, int], tuple[Path, dict]]:
@@ -163,7 +160,11 @@ def main() -> None:
     )
     fig, axes = plt.subplots(6, 2, figsize=(20, 27), constrained_layout=True)
     x = np.arange(len(DIALECTS))
-    run_offsets = np.linspace(-0.12, 0.12, len(run_results))
+    run_offsets = (
+        np.linspace(-0.12, 0.12, len(run_results))
+        if len(run_results) > 1
+        else np.zeros(1)
+    )
 
     for row, (problem_id, problem) in enumerate(PROBLEMS):
         points_by_run = [
