@@ -14,6 +14,7 @@ from cuda_dialect_summary_score_and_token_efficiency import (
     load_data,
     run_path,
 )
+from matplotlib.ticker import LogLocator, StrMethodFormatter
 
 
 def parse_args() -> argparse.Namespace:
@@ -129,6 +130,9 @@ def render_chart(
     for ax in axes:
         ax.set_yscale("log")
         ax.autoscale(enable=True, axis="y")
+        ax.yaxis.set_major_formatter(StrMethodFormatter("{x:g}"))
+        ax.yaxis.set_minor_locator(LogLocator(base=10, subs=(2, 3, 4, 6)))
+        ax.yaxis.set_minor_formatter(StrMethodFormatter("{x:g}"))
         ax.axhline(
             1.0,
             color=reference_color,
