@@ -120,20 +120,69 @@ def load_run_results(root: Path) -> dict[tuple[str, int], tuple[Path, dict]]:
 
 
 def load_result(path: Path, result: dict) -> tuple[float, float]:
+    reward_hacked = result.get("reward_hacked", False)
+    if not isinstance(reward_hacked, bool):
+        raise TypeError(f"invalid reward_hacked flag: {path}")
+    if reward_hacked:
+        return np.nan, np.nan
+
     if result.get("correct") is False:
         peak_fraction = 0.0
     elif result.get("correct") is True:
         peak_fraction = result.get("peak_fraction")
-        if not isinstance(peak_fraction, (int, float)) or peak_fraction <= 0:
+        if (
+            not isinstance(peak_fraction, (int, float))
+            or not np.isfinite(peak_fraction)
+            or peak_fraction <= 0
+        ):
             raise ValueError(f"missing corrected score: {path}")
     else:
         raise ValueError(f"missing correctness grade: {path}")
 
     usage = result.get("usage") or {}
     tokens = (usage.get("input_tokens") or 0) + (usage.get("output_tokens") or 0)
-    if tokens <= 0:
+    if not np.isfinite(tokens) or tokens <= 0:
         raise ValueError(f"missing token usage: {path}")
     return 100.0 * peak_fraction, tokens / 1e8
+
+
+def aggregate_data(
+    scores: np.ndarray, tokens: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if scores.shape != tokens.shape:
+        raise ValueError("score and token arrays must have the same shape")
+
+    excluded = np.isnan(scores) & np.isnan(tokens)
+    included = np.isfinite(scores) & np.isfinite(tokens)
+    if not np.all(excluded | included):
+        raise ValueError("scores and token counts must be finite or excluded together")
+    if np.any(scores[included] < 0):
+        raise ValueError("scores must be non-negative")
+    if np.any(tokens[included] <= 0):
+        raise ValueError("included token counts must be positive")
+
+    score_per_token = np.full_like(scores, np.nan, dtype=float)
+    np.divide(scores / 100.0, tokens, out=score_per_token, where=included)
+
+    included_counts = included.sum(axis=0)
+    score_sums = np.nansum(scores, axis=0)
+    mean_scores = np.full(scores.shape[1:], np.nan, dtype=float)
+    np.divide(
+        score_sums,
+        included_counts,
+        out=mean_scores,
+        where=included_counts > 0,
+    )
+
+    token_sums = np.nansum(tokens, axis=0)
+    combined_score_per_token = np.full(scores.shape[1:], np.nan, dtype=float)
+    np.divide(
+        score_sums / 100.0,
+        token_sums,
+        out=combined_score_per_token,
+        where=token_sums > 0,
+    )
+    return score_per_token, mean_scores, combined_score_per_token
 
 
 def load_data(runs: list[Path]) -> tuple[np.ndarray, np.ndarray, str, str]:
@@ -171,13 +220,37 @@ def draw_bars(
     for dialect_index, dialect in enumerate(DIALECTS):
         observations = values[:, dialect_index, :]
         average = centers[dialect_index]
-        low = observations.min(axis=0)
-        high = observations.max(axis=0)
+        low = np.full(len(PROBLEMS), np.nan)
+        high = np.full(len(PROBLEMS), np.nan)
+        for problem_index in range(len(PROBLEMS)):
+            included = observations[:, problem_index]
+            included = included[np.isfinite(included)]
+            if included.size:
+                low[problem_index] = included.min()
+                high[problem_index] = included.max()
         positions = x - group_width / 2 + bar_width * (dialect_index + 0.5)
+        included = np.isfinite(average) & np.isfinite(low) & np.isfinite(high)
+        for position in positions[~included]:
+            ax.text(
+                position,
+                0.02,
+                "N/A",
+                transform=ax.get_xaxis_transform(),
+                color=error_color,
+                fontsize=7,
+                rotation=90,
+                ha="center",
+                va="bottom",
+            )
         ax.bar(
-            positions,
-            average,
-            yerr=np.vstack((average - low, high - average)),
+            positions[included],
+            average[included],
+            yerr=np.vstack(
+                (
+                    np.maximum(average[included] - low[included], 0),
+                    np.maximum(high[included] - average[included], 0),
+                )
+            ),
             width=bar_width * 0.92,
             color=COLORS[dialect],
             edgecolor="white",
@@ -210,11 +283,10 @@ def render_chart(
     run_count: int,
     theme: str,
 ) -> Path:
-    # Efficiency uses fractional score per 100 million tokens. Scores are
-    # displayed as percentages in the first panel, so divide by 100 here.
-    score_per_token = (scores / 100.0) / tokens
-    average_scores = scores.mean(axis=0)
-    combined_score_per_token = (scores.sum(axis=0) / 100.0) / tokens.sum(axis=0)
+    score_per_token, average_scores, combined_score_per_token = aggregate_data(
+        scores, tokens
+    )
+    excluded_count = int(np.isnan(scores).sum())
 
     if theme == "dark":
         plt.style.use("dark_background")
@@ -273,13 +345,14 @@ def render_chart(
         ncols=6,
         frameon=False,
         title=(
-            "Bar: mean score / combined token efficiency · "
-            "Error bar: observed range"
+            "Bar: unflagged mean score / combined token efficiency · "
+            "Error bar: unflagged range · Missing bar: all runs reward-hacked"
         ),
     )
     fig.suptitle(
         "KernelBench-Hard: score and token efficiency by dialect\n"
-        f"Runs: {run_count}  ·  Model: {MODEL_DISPLAY_NAMES.get(model, model)}"
+        f"Runs: {run_count}  ·  Reward-hacked results excluded: {excluded_count}  ·  "
+        f"Model: {MODEL_DISPLAY_NAMES.get(model, model)}"
         f"  ·  Harness: {harness}",
         fontsize=18,
         fontweight="bold",

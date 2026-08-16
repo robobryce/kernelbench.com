@@ -54,6 +54,7 @@ def render_chart(
     normalized_mean_scores: np.ndarray,
     normalized_efficiency: np.ndarray,
     normalized_combined_efficiency: np.ndarray,
+    excluded_count: int,
     theme: str,
 ) -> Path:
     if theme == "dark":
@@ -64,6 +65,7 @@ def render_chart(
         circle_edge_color = "#000000"
         diamond_edge_color = "#f3f4f6"
         reference_color = "#f3f4f6"
+        missing_color = "#9aa4b2"
     else:
         plt.style.use("default")
         figure_color = "white"
@@ -72,6 +74,7 @@ def render_chart(
         circle_edge_color = "white"
         diamond_edge_color = "#111111"
         reference_color = "#111827"
+        missing_color = "#6b7280"
 
     plt.rcParams.update(
         {
@@ -115,7 +118,21 @@ def render_chart(
                 color = DIALECT_COLORS[dialect]
                 values = observations[:, index]
                 center = centers[index]
-                low, high = values.min(), values.max()
+                included = np.isfinite(values)
+                if not included.any():
+                    ax.text(
+                        index,
+                        0.03,
+                        "N/A",
+                        transform=ax.get_xaxis_transform(),
+                        color=missing_color,
+                        fontsize=9,
+                        ha="center",
+                        va="bottom",
+                    )
+                    continue
+                included_values = values[included]
+                low, high = included_values.min(), included_values.max()
 
                 ax.errorbar(
                     index,
@@ -130,8 +147,8 @@ def render_chart(
                     zorder=1,
                 )
                 ax.scatter(
-                    index + run_offsets,
-                    values,
+                    index + run_offsets[included],
+                    included_values,
                     s=72,
                     marker="o",
                     color=color,
@@ -171,7 +188,7 @@ def render_chart(
 
     fig.suptitle(
         f"KernelBench-Hard: {run_count}-run score and token efficiency "
-        "relative to CUDA C++",
+        f"relative to CUDA C++ · {excluded_count} reward-hacked results excluded",
         fontsize=19,
         fontweight="bold",
     )
@@ -195,9 +212,9 @@ def render_chart(
         ncols=len(DIALECTS),
         frameon=False,
         title=(
-            "Circles: individual runs   ·   Diamond: normalized mean score / "
-            "combined token efficiency   ·   Bar: observed range   ·   "
-            "Dashed line: CUDA C++ baseline"
+            "Circles: unflagged runs   ·   Diamond: normalized unflagged mean "
+            "score / combined token efficiency   ·   Bar: unflagged range   ·   "
+            "N/A: all runs reward-hacked   ·   Dashed line: CUDA C++ baseline"
         ),
         title_fontsize=11,
         fontsize=11,
@@ -232,9 +249,10 @@ def main() -> None:
 
     scores, tokens = load_data(run_results)
     normalized = normalize_data(scores, tokens)
+    excluded_count = int(np.isnan(scores).sum())
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     for theme in ("light", "dark"):
-        output = render_chart(*normalized, theme)
+        output = render_chart(*normalized, excluded_count, theme)
         print(output)
 
 

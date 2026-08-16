@@ -8,6 +8,10 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+from cuda_dialect_summary_score_and_token_efficiency import (
+    aggregate_data,
+    load_result,
+)
 from matplotlib.lines import Line2D
 
 DIALECTS = [
@@ -117,20 +121,7 @@ def load_run_results(root: Path) -> dict[tuple[str, int], tuple[Path, dict]]:
 
 
 def load_point(path: Path, result: dict) -> tuple[float, float]:
-    if result.get("correct") is False:
-        peak_fraction = 0.0
-    elif result.get("correct") is True:
-        peak_fraction = result.get("peak_fraction")
-        if not isinstance(peak_fraction, (int, float)) or peak_fraction <= 0:
-            raise ValueError(f"missing corrected score: {path}")
-    else:
-        raise ValueError(f"missing correctness grade: {path}")
-
-    usage = result.get("usage") or {}
-    tokens = (usage.get("input_tokens") or 0) + (usage.get("output_tokens") or 0)
-    if tokens <= 0:
-        raise ValueError(f"missing token usage: {path}")
-    return 100.0 * peak_fraction, tokens / 1e8
+    return load_result(path, result)
 
 
 def render_chart(
@@ -143,6 +134,7 @@ def render_chart(
         grid_color = "#9aa4b2"
         circle_edge_color = "#000000"
         diamond_edge_color = "#f3f4f6"
+        missing_color = "#9aa4b2"
     else:
         plt.style.use("default")
         figure_color = "white"
@@ -150,6 +142,7 @@ def render_chart(
         grid_color = "#6b7280"
         circle_edge_color = "white"
         diamond_edge_color = "#111111"
+        missing_color = "#6b7280"
 
     plt.rcParams.update(
         {
@@ -170,6 +163,7 @@ def render_chart(
         if len(run_results) > 1
         else np.zeros(1)
     )
+    excluded_count = 0
 
     for row, (problem_id, problem) in enumerate(PROBLEMS):
         points_by_run = [
@@ -185,11 +179,8 @@ def render_chart(
         tokens = np.array(
             [[point[1] for point in points] for points in points_by_run]
         )
-        # Efficiency uses fractional score per 100 million tokens. Scores are
-        # displayed as percentages, so divide by 100 for this calculation.
-        efficiency = (scores / 100.0) / tokens
-        mean_scores = scores.mean(axis=0)
-        combined_efficiency = (scores.sum(axis=0) / 100.0) / tokens.sum(axis=0)
+        excluded_count += int(np.isnan(scores).sum())
+        efficiency, mean_scores, combined_efficiency = aggregate_data(scores, tokens)
 
         for col, (metric, observations, centers, ylabel) in enumerate(
             [
@@ -207,7 +198,21 @@ def render_chart(
                 color = DIALECT_COLORS[dialect]
                 values = observations[:, index]
                 center = centers[index]
-                low, high = values.min(), values.max()
+                included = np.isfinite(values)
+                if not included.any():
+                    ax.text(
+                        index,
+                        0.03,
+                        "N/A",
+                        transform=ax.get_xaxis_transform(),
+                        color=missing_color,
+                        fontsize=9,
+                        ha="center",
+                        va="bottom",
+                    )
+                    continue
+                included_values = values[included]
+                low, high = included_values.min(), included_values.max()
 
                 # The bar spans all observed runs. The large diamond is the mean
                 # score or combined efficiency; the circles retain each run.
@@ -224,8 +229,8 @@ def render_chart(
                     zorder=1,
                 )
                 ax.scatter(
-                    index + run_offsets,
-                    values,
+                    index + run_offsets[included],
+                    included_values,
                     s=72,
                     marker="o",
                     color=color,
@@ -258,7 +263,7 @@ def render_chart(
 
     fig.suptitle(
         f"KernelBench-Hard: {len(run_results)}-run score and token efficiency "
-        "by problem and dialect",
+        f"by problem and dialect · {excluded_count} reward-hacked results excluded",
         fontsize=19,
         fontweight="bold",
     )
@@ -282,8 +287,9 @@ def render_chart(
         ncols=6,
         frameon=False,
         title=(
-            "Circles: individual runs   ·   Diamond: mean score / combined "
-            "token efficiency   ·   Bar: observed range"
+            "Circles: unflagged runs   ·   Diamond: unflagged mean score / "
+            "combined token efficiency   ·   Bar: unflagged range   ·   "
+            "N/A: all runs reward-hacked"
         ),
         title_fontsize=11,
         fontsize=11,

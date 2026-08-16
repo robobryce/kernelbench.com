@@ -10,6 +10,7 @@ from cuda_dialect_summary_score_and_token_efficiency import (
     DIALECTS,
     MODEL_DISPLAY_NAMES,
     OUTPUT_DIR,
+    aggregate_data,
     draw_bars,
     load_data,
     run_path,
@@ -36,17 +37,14 @@ def parse_args() -> argparse.Namespace:
 def normalize_data(
     scores: np.ndarray, tokens: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    if not np.all(np.isfinite(scores)):
-        raise ValueError("scores must be finite")
-    if not np.all(np.isfinite(tokens)) or np.any(tokens <= 0):
-        raise ValueError("token counts must be finite and positive")
-
-    score_per_token = (scores / 100.0) / tokens
-    mean_scores = scores.mean(axis=0)
-    combined_efficiency = (scores.sum(axis=0) / 100.0) / tokens.sum(axis=0)
+    score_per_token, mean_scores, combined_efficiency = aggregate_data(scores, tokens)
 
     cuda_score_baseline = mean_scores[0]
     cuda_efficiency_baseline = combined_efficiency[0]
+    if np.any(~np.isfinite(cuda_score_baseline)):
+        raise ValueError("every problem needs an unflagged CUDA C++ score")
+    if np.any(~np.isfinite(cuda_efficiency_baseline)):
+        raise ValueError("every problem needs unflagged CUDA C++ token efficiency")
     if np.any(cuda_score_baseline <= 0):
         raise ValueError("CUDA C++ mean score must be positive for every problem")
     if np.any(cuda_efficiency_baseline <= 0):
@@ -78,6 +76,7 @@ def render_chart(
     model: str,
     harness: str,
     run_count: int,
+    excluded_count: int,
     theme: str,
 ) -> Path:
     if theme == "dark":
@@ -153,13 +152,15 @@ def render_chart(
         ncols=len(DIALECTS),
         frameon=False,
         title=(
-            "Bar: normalized mean score / combined token efficiency · "
-            "Error bar: observed range · Dashed line: CUDA C++ baseline"
+            "Bar: normalized unflagged mean score / combined token efficiency · "
+            "Error bar: unflagged range · Missing bar: all runs reward-hacked · "
+            "Dashed line: CUDA C++ baseline"
         ),
     )
     fig.suptitle(
         "KernelBench-Hard: score and token efficiency relative to CUDA C++\n"
-        f"Runs: {run_count}  ·  Model: {MODEL_DISPLAY_NAMES.get(model, model)}"
+        f"Runs: {run_count}  ·  Reward-hacked results excluded: {excluded_count}  ·  "
+        f"Model: {MODEL_DISPLAY_NAMES.get(model, model)}"
         f"  ·  Harness: {harness}",
         fontsize=18,
         fontweight="bold",
@@ -192,6 +193,7 @@ def main() -> None:
             model,
             harness,
             len(args.runs),
+            int(np.isnan(scores).sum()),
             theme,
         )
         print(output)
