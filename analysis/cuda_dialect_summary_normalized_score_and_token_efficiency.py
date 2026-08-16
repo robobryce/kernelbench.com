@@ -83,16 +83,14 @@ def render_chart(
         figure_color = "#000000"
         axes_color = "#000000"
         grid_color = "#9aa4b2"
-        edge_color = "#000000"
-        error_color = "#d1d5db"
+        missing_color = "#d1d5db"
         reference_color = "#f3f4f6"
     else:
         plt.style.use("default")
         figure_color = "white"
         axes_color = "white"
         grid_color = "#6b7280"
-        edge_color = "white"
-        error_color = "#222222"
+        missing_color = "#222222"
         reference_color = "#111827"
 
     plt.rcParams.update(
@@ -115,7 +113,7 @@ def render_chart(
         normalized_mean_scores,
         "Relative score (CUDA C++ = 1.0)",
         "KernelBench-Hard normalized score by problem",
-        error_color,
+        missing_color,
     )
     draw_bars(
         axes[1],
@@ -123,7 +121,7 @@ def render_chart(
         normalized_combined_efficiency,
         "Relative score / token (CUDA C++ = 1.0)",
         "KernelBench-Hard normalized token efficiency by problem",
-        error_color,
+        missing_color,
     )
     for ax in axes:
         ax.axhline(
@@ -163,8 +161,6 @@ def render_chart(
     fig.subplots_adjust(top=0.88, bottom=0.14, hspace=0.48)
 
     for ax in axes:
-        for patch in ax.patches:
-            patch.set_edgecolor(edge_color)
         for line in ax.get_ygridlines():
             line.set_color(grid_color)
 

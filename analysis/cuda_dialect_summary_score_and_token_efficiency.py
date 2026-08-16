@@ -216,7 +216,7 @@ def draw_bars(
     centers: np.ndarray,
     ylabel: str,
     title: str,
-    error_color: str,
+    missing_color: str,
     y_limits: tuple[float, float] | None = None,
 ) -> None:
     x = np.arange(len(PROBLEMS))
@@ -241,7 +241,7 @@ def draw_bars(
                 0.02,
                 "N/A",
                 transform=ax.get_xaxis_transform(),
-                color=error_color,
+                color=missing_color,
                 fontsize=7,
                 rotation=90,
                 ha="center",
@@ -252,8 +252,9 @@ def draw_bars(
             low[included],
             width=bar_width * 0.92,
             color=COLORS[dialect],
-            edgecolor="white",
-            linewidth=0.6,
+            edgecolor="none",
+            linewidth=0,
+            antialiased=False,
             label=dialect,
         )
         ax.bar(
@@ -262,16 +263,17 @@ def draw_bars(
             bottom=low[included],
             width=bar_width * 0.92,
             color=lighter_color(COLORS[dialect]),
-            edgecolor="white",
-            linewidth=0.6,
+            edgecolor="none",
+            linewidth=0,
+            antialiased=False,
         )
         average_half_width = bar_width * 0.34
         ax.hlines(
             average[included],
             positions[included] - average_half_width,
             positions[included] + average_half_width,
-            color=error_color,
-            linewidth=2.0,
+            color="#000000",
+            linewidth=2.2,
             zorder=4,
         )
 
@@ -304,15 +306,13 @@ def render_chart(
         figure_color = "#000000"
         axes_color = "#000000"
         grid_color = "#9aa4b2"
-        edge_color = "#000000"
-        error_color = "#d1d5db"
+        missing_color = "#d1d5db"
     else:
         plt.style.use("default")
         figure_color = "white"
         axes_color = "white"
         grid_color = "#6b7280"
-        edge_color = "white"
-        error_color = "#222222"
+        missing_color = "#222222"
 
     plt.rcParams.update(
         {
@@ -333,7 +333,7 @@ def render_chart(
         average_scores,
         "Score (%)",
         "KernelBench-Hard score by problem",
-        error_color,
+        missing_color,
         (0, 50),
     )
     draw_bars(
@@ -342,7 +342,7 @@ def render_chart(
         combined_score_per_token,
         "Score / tokens (score / 100M tokens)",
         "KernelBench-Hard token efficiency by problem",
-        error_color,
+        missing_color,
     )
     axes[0].tick_params(axis="x", labelbottom=True)
     axes[0].set_xlabel("Problem", labelpad=5)
@@ -372,8 +372,6 @@ def render_chart(
     fig.subplots_adjust(top=0.88, bottom=0.14, hspace=0.48)
 
     for ax in axes:
-        for patch in ax.patches:
-            patch.set_edgecolor(edge_color)
         for line in ax.get_ygridlines():
             line.set_color(grid_color)
 
