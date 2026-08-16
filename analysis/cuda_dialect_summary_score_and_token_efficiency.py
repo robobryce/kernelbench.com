@@ -53,7 +53,7 @@ VARIANT_TO_DIALECT_INDEX = {
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 
 
-def lighter_color(color: str, amount: float = 0.22) -> tuple[float, float, float]:
+def lighter_color(color: str, amount: float = 0.35) -> tuple[float, float, float]:
     return tuple(channel + (1.0 - channel) * amount for channel in to_rgb(color))
 
 
