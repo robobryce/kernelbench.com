@@ -119,7 +119,7 @@ def render_chart(
         axes[1],
         normalized_efficiency,
         normalized_combined_efficiency,
-        "Relative score / token (CUDA C++ = 1.0)",
+        "Relative token efficiency\n(score per 100 million tokens; CUDA C++ = 1.0)",
         "KernelBench-Hard normalized token efficiency by problem",
         missing_color,
     )

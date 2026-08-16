@@ -109,7 +109,10 @@ def render_chart(
                     "Normalized score per token",
                     normalized_efficiency[:, :, row],
                     normalized_combined_efficiency[:, row],
-                    "Relative score / token (CUDA C++ = 1.0)",
+                    (
+                        "Relative token efficiency\n"
+                        "(score per 100 million tokens; CUDA C++ = 1.0)"
+                    ),
                 ),
             ]
         ):

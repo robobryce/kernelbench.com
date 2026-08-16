@@ -189,7 +189,7 @@ def render_chart(
                     "Score per token",
                     efficiency,
                     combined_efficiency,
-                    "Score / tokens (score / 100M tokens)",
+                    "Score per 100 million tokens",
                 ),
             ]
         ):

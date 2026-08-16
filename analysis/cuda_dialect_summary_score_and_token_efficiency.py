@@ -340,7 +340,7 @@ def render_chart(
         axes[1],
         score_per_token,
         combined_score_per_token,
-        "Score / tokens (score / 100M tokens)",
+        "Score per 100 million tokens",
         "KernelBench-Hard token efficiency by problem",
         missing_color,
     )
