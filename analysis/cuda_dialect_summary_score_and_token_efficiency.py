@@ -8,6 +8,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.colors import to_rgb
 
 DIALECTS = [
     "CUDA C++",
@@ -50,6 +51,10 @@ VARIANT_TO_DIALECT_INDEX = {
 }
 
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"
+
+
+def lighter_color(color: str, amount: float = 0.22) -> tuple[float, float, float]:
+    return tuple(channel + (1.0 - channel) * amount for channel in to_rgb(color))
 
 
 def run_path(value: str) -> Path:
@@ -244,24 +249,30 @@ def draw_bars(
             )
         ax.bar(
             positions[included],
-            average[included],
-            yerr=np.vstack(
-                (
-                    np.maximum(average[included] - low[included], 0),
-                    np.maximum(high[included] - average[included], 0),
-                )
-            ),
+            low[included],
             width=bar_width * 0.92,
             color=COLORS[dialect],
             edgecolor="white",
             linewidth=0.6,
-            error_kw={
-                "ecolor": error_color,
-                "elinewidth": 1.2,
-                "capsize": 3,
-                "capthick": 1.2,
-            },
             label=dialect,
+        )
+        ax.bar(
+            positions[included],
+            np.maximum(high[included] - low[included], 0),
+            bottom=low[included],
+            width=bar_width * 0.92,
+            color=lighter_color(COLORS[dialect]),
+            edgecolor="white",
+            linewidth=0.6,
+        )
+        average_half_width = bar_width * 0.34
+        ax.hlines(
+            average[included],
+            positions[included] - average_half_width,
+            positions[included] + average_half_width,
+            color=error_color,
+            linewidth=2.0,
+            zorder=4,
         )
 
     ax.set_title(title, fontweight="bold")
@@ -345,8 +356,9 @@ def render_chart(
         ncols=6,
         frameon=False,
         title=(
-            "Bar: unflagged mean score / combined token efficiency · "
-            "Error bar: unflagged range · Missing bar: all runs reward-hacked"
+            "Base stack: unflagged minimum · Lighter stack: range to maximum · "
+            "Line: mean score / combined token efficiency · "
+            "N/A: all runs reward-hacked"
         ),
     )
     fig.suptitle(

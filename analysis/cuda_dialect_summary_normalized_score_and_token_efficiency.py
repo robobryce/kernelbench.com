@@ -146,8 +146,9 @@ def render_chart(
         ncols=len(DIALECTS),
         frameon=False,
         title=(
-            "Bar: normalized unflagged mean score / combined token efficiency · "
-            "Error bar: unflagged range · Missing bar: all runs reward-hacked · "
+            "Base stack: normalized unflagged minimum · Lighter stack: range to "
+            "maximum · Line: normalized mean score / combined token efficiency · "
+            "N/A: all runs reward-hacked · "
             "Dashed line: CUDA C++ baseline"
         ),
     )
