@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from cuda_dialect_summary_score_and_token_efficiency import (
     aggregate_data,
-    draw_box_scatter_group,
+    draw_bar_error_group,
     lighter_color,
     load_result,
 )
@@ -204,13 +204,15 @@ def render_chart(
                         va="bottom",
                     )
                     continue
-                draw_box_scatter_group(
+                draw_bar_error_group(
                     ax,
                     index,
                     values,
                     center,
                     color,
                     0.52,
+                    3.4,
+                    8.0,
                 )
 
             ax.set_title(f"{problem} — {metric}", fontweight="bold")
@@ -244,9 +246,9 @@ def render_chart(
         ncols=6,
         frameon=False,
         title=(
-            "Dots: unflagged runs · Box: interquartile range · Center line: "
-            "median · Whiskers: minimum–maximum\n"
-            "Black diamond: unflagged mean score / combined token efficiency · "
+            "Bars and black-outlined diamonds: unflagged mean score / combined "
+            "token efficiency · Dots: unflagged runs\n"
+            "Colored error bars: minimum–maximum · "
             "N/A: all runs reward-hacked"
         ),
         title_fontsize=11,

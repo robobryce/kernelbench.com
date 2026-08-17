@@ -69,13 +69,15 @@ def dialect_legend_handles() -> list[Patch]:
     ]
 
 
-def draw_box_scatter_group(
+def draw_bar_error_group(
     ax: plt.Axes,
     position: float,
     values: np.ndarray,
     center: float,
     color: str,
     width: float,
+    error_linewidth: float,
+    capsize: float,
 ) -> bool:
     included = np.isfinite(values)
     if not included.any():
@@ -84,22 +86,30 @@ def draw_box_scatter_group(
         raise ValueError("a plotted group with observations needs a finite center")
 
     included_values = values[included]
-    ax.boxplot(
-        [included_values],
-        positions=[position],
-        widths=width,
-        whis=(0, 100),
-        patch_artist=True,
-        showfliers=False,
-        manage_ticks=False,
-        boxprops={
-            "facecolor": lighter_color(color, 0.55),
-            "edgecolor": color,
-            "linewidth": 1.2,
-        },
-        whiskerprops={"color": color, "linewidth": 1.2},
-        capprops={"color": color, "linewidth": 1.2},
-        medianprops={"color": color, "linewidth": 2.0},
+    low = included_values.min()
+    high = included_values.max()
+    ax.bar(
+        position,
+        center,
+        width=width,
+        color=lighter_color(color, 0.55),
+        edgecolor=color,
+        linewidth=1.2,
+        zorder=1,
+    )
+    ax.errorbar(
+        position,
+        center,
+        yerr=[
+            [np.maximum(center - low, 0.0)],
+            [np.maximum(high - center, 0.0)],
+        ],
+        fmt="none",
+        ecolor=color,
+        elinewidth=error_linewidth,
+        capsize=capsize,
+        capthick=error_linewidth,
+        alpha=0.95,
         zorder=2,
     )
 
@@ -295,7 +305,7 @@ def load_data(runs: list[Path]) -> tuple[np.ndarray, np.ndarray, str, str]:
     return scores, tokens, models.pop(), harnesses.pop()
 
 
-def draw_distributions(
+def draw_bars(
     ax: plt.Axes,
     values: np.ndarray,
     centers: np.ndarray,
@@ -316,13 +326,15 @@ def draw_distributions(
             + group_slot_width * (dialect_index + 0.5)
         )
         for problem_index, position in enumerate(positions):
-            plotted = draw_box_scatter_group(
+            plotted = draw_bar_error_group(
                 ax,
                 position,
                 observations[:, problem_index],
                 average[problem_index],
                 COLORS[dialect],
                 group_slot_width * 0.76,
+                2.2,
+                4.0,
             )
             if not plotted:
                 ax.text(
@@ -343,7 +355,9 @@ def draw_distributions(
     ax.grid(axis="y", alpha=0.28, linewidth=0.8)
     ax.set_axisbelow(True)
     if y_limits is not None:
-        ax.set_ylim(*y_limits)
+        lower, upper = y_limits
+        lower_padding = 0.025 * (upper - lower) if lower == 0 else 0
+        ax.set_ylim(lower - lower_padding, upper)
     else:
         upper = ax.get_ylim()[1]
         ax.set_ylim(bottom=-0.025 * upper)
@@ -388,7 +402,7 @@ def render_chart(
     fig.patch.set_facecolor(figure_color)
     for ax in axes:
         ax.set_facecolor(axes_color)
-    draw_distributions(
+    draw_bars(
         axes[0],
         scores,
         average_scores,
@@ -397,7 +411,7 @@ def render_chart(
         missing_color,
         (0, 50),
     )
-    draw_distributions(
+    draw_bars(
         axes[1],
         score_per_token,
         combined_score_per_token,
@@ -415,9 +429,9 @@ def render_chart(
         ncols=6,
         frameon=False,
         title=(
-            "Dots: unflagged runs · Box: interquartile range · Center line: "
-            "median · Whiskers: minimum–maximum\n"
-            "Black diamond: mean score / combined token efficiency · "
+            "Bars and black-outlined diamonds: mean score / combined token "
+            "efficiency · Dots: unflagged runs\n"
+            "Colored error bars: minimum–maximum · "
             "N/A: all runs reward-hacked"
         ),
     )

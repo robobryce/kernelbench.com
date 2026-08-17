@@ -11,7 +11,7 @@ from cuda_dialect_per_dialect_score_and_token_efficiency import (
     DIALECTS,
     OUTPUT_DIR,
     PROBLEMS,
-    draw_box_scatter_group,
+    draw_bar_error_group,
     lighter_color,
     load_point,
     load_run_results,
@@ -129,13 +129,15 @@ def render_chart(
                         va="bottom",
                     )
                     continue
-                draw_box_scatter_group(
+                draw_bar_error_group(
                     ax,
                     index,
                     values,
                     center,
                     color,
                     0.52,
+                    3.4,
+                    8.0,
                 )
 
             ax.axhline(
@@ -176,10 +178,9 @@ def render_chart(
         ncols=len(DIALECTS),
         frameon=False,
         title=(
-            "Dots: normalized unflagged runs · Box: interquartile range · "
-            "Center line: median · Whiskers: minimum–maximum\n"
-            "Black diamond: normalized unflagged mean score / combined token "
-            "efficiency · N/A: all runs reward-hacked · "
+            "Bars and black-outlined diamonds: normalized unflagged mean score / "
+            "combined token efficiency · Dots: normalized unflagged runs\n"
+            "Colored error bars: minimum–maximum · N/A: all runs reward-hacked · "
             "Dashed line: CUDA C++ baseline"
         ),
         title_fontsize=11,
