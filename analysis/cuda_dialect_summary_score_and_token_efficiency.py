@@ -9,6 +9,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import to_rgb
+from matplotlib.patches import Patch
 
 DIALECTS = [
     "CUDA C++",
@@ -55,6 +56,90 @@ OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 
 def lighter_color(color: str, amount: float = 0.35) -> tuple[float, float, float]:
     return tuple(channel + (1.0 - channel) * amount for channel in to_rgb(color))
+
+
+def dialect_legend_handles() -> list[Patch]:
+    return [
+        Patch(
+            facecolor=lighter_color(COLORS[dialect], 0.55),
+            edgecolor=COLORS[dialect],
+            label=dialect,
+        )
+        for dialect in DIALECTS
+    ]
+
+
+def draw_box_scatter_group(
+    ax: plt.Axes,
+    position: float,
+    values: np.ndarray,
+    center: float,
+    color: str,
+    width: float,
+) -> bool:
+    included = np.isfinite(values)
+    if not included.any():
+        return False
+    if not np.isfinite(center):
+        raise ValueError("a plotted group with observations needs a finite center")
+
+    included_values = values[included]
+    ax.boxplot(
+        [included_values],
+        positions=[position],
+        widths=width,
+        whis=(0, 100),
+        patch_artist=True,
+        showfliers=False,
+        manage_ticks=False,
+        boxprops={
+            "facecolor": lighter_color(color, 0.55),
+            "edgecolor": color,
+            "linewidth": 1.2,
+        },
+        whiskerprops={"color": color, "linewidth": 1.2},
+        capprops={"color": color, "linewidth": 1.2},
+        medianprops={"color": color, "linewidth": 2.0},
+        zorder=2,
+    )
+
+    run_offsets = (
+        np.linspace(-0.28 * width, 0.28 * width, values.size)
+        if values.size > 1
+        else np.zeros(1)
+    )
+    ax.scatter(
+        position + run_offsets[included],
+        included_values,
+        s=25,
+        marker="o",
+        color=color,
+        edgecolor=ax.get_facecolor(),
+        linewidth=0.55,
+        alpha=0.95,
+        zorder=3,
+    )
+    ax.scatter(
+        position,
+        center,
+        s=72,
+        marker="D",
+        facecolor="none",
+        edgecolor="#ffffff",
+        linewidth=2.8,
+        zorder=4,
+    )
+    ax.scatter(
+        position,
+        center,
+        s=58,
+        marker="D",
+        facecolor="none",
+        edgecolor="#000000",
+        linewidth=1.5,
+        zorder=5,
+    )
+    return True
 
 
 def run_path(value: str) -> Path:
@@ -210,7 +295,7 @@ def load_data(runs: list[Path]) -> tuple[np.ndarray, np.ndarray, str, str]:
     return scores, tokens, models.pop(), harnesses.pop()
 
 
-def draw_bars(
+def draw_distributions(
     ax: plt.Axes,
     values: np.ndarray,
     centers: np.ndarray,
@@ -221,61 +306,36 @@ def draw_bars(
 ) -> None:
     x = np.arange(len(PROBLEMS))
     group_width = 0.84
-    bar_width = group_width / len(DIALECTS)
+    group_slot_width = group_width / len(DIALECTS)
     for dialect_index, dialect in enumerate(DIALECTS):
         observations = values[:, dialect_index, :]
         average = centers[dialect_index]
-        low = np.full(len(PROBLEMS), np.nan)
-        high = np.full(len(PROBLEMS), np.nan)
-        for problem_index in range(len(PROBLEMS)):
-            included = observations[:, problem_index]
-            included = included[np.isfinite(included)]
-            if included.size:
-                low[problem_index] = included.min()
-                high[problem_index] = included.max()
-        positions = x - group_width / 2 + bar_width * (dialect_index + 0.5)
-        included = np.isfinite(average) & np.isfinite(low) & np.isfinite(high)
-        for position in positions[~included]:
-            ax.text(
+        positions = (
+            x
+            - group_width / 2
+            + group_slot_width * (dialect_index + 0.5)
+        )
+        for problem_index, position in enumerate(positions):
+            plotted = draw_box_scatter_group(
+                ax,
                 position,
-                0.02,
-                "N/A",
-                transform=ax.get_xaxis_transform(),
-                color=missing_color,
-                fontsize=7,
-                rotation=90,
-                ha="center",
-                va="bottom",
+                observations[:, problem_index],
+                average[problem_index],
+                COLORS[dialect],
+                group_slot_width * 0.76,
             )
-        ax.bar(
-            positions[included],
-            low[included],
-            width=bar_width * 0.92,
-            color=COLORS[dialect],
-            edgecolor="none",
-            linewidth=0,
-            antialiased=False,
-            label=dialect,
-        )
-        ax.bar(
-            positions[included],
-            np.maximum(high[included] - low[included], 0),
-            bottom=low[included],
-            width=bar_width * 0.92,
-            color=lighter_color(COLORS[dialect]),
-            edgecolor="none",
-            linewidth=0,
-            antialiased=False,
-        )
-        average_half_width = bar_width * 0.34
-        ax.hlines(
-            average[included],
-            positions[included] - average_half_width,
-            positions[included] + average_half_width,
-            color="#000000",
-            linewidth=2.2,
-            zorder=4,
-        )
+            if not plotted:
+                ax.text(
+                    position,
+                    0.02,
+                    "N/A",
+                    transform=ax.get_xaxis_transform(),
+                    color=missing_color,
+                    fontsize=7,
+                    rotation=90,
+                    ha="center",
+                    va="bottom",
+                )
 
     ax.set_title(title, fontweight="bold")
     ax.set_ylabel(ylabel)
@@ -285,7 +345,8 @@ def draw_bars(
     if y_limits is not None:
         ax.set_ylim(*y_limits)
     else:
-        ax.set_ylim(bottom=0)
+        upper = ax.get_ylim()[1]
+        ax.set_ylim(bottom=-0.025 * upper)
 
 
 def render_chart(
@@ -327,7 +388,7 @@ def render_chart(
     fig.patch.set_facecolor(figure_color)
     for ax in axes:
         ax.set_facecolor(axes_color)
-    draw_bars(
+    draw_distributions(
         axes[0],
         scores,
         average_scores,
@@ -336,7 +397,7 @@ def render_chart(
         missing_color,
         (0, 50),
     )
-    draw_bars(
+    draw_distributions(
         axes[1],
         score_per_token,
         combined_score_per_token,
@@ -348,16 +409,15 @@ def render_chart(
     axes[0].set_xlabel("Problem", labelpad=5)
     axes[1].set_xlabel("Problem")
 
-    handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(
-        handles,
-        labels,
+        handles=dialect_legend_handles(),
         loc="lower center",
         ncols=6,
         frameon=False,
         title=(
-            "Base stack: unflagged minimum · Lighter stack: range to maximum · "
-            "Line: mean score / combined token efficiency · "
+            "Dots: unflagged runs · Box: interquartile range · Center line: "
+            "median · Whiskers: minimum–maximum\n"
+            "Black diamond: mean score / combined token efficiency · "
             "N/A: all runs reward-hacked"
         ),
     )

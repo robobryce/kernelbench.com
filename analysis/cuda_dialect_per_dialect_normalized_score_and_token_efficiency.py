@@ -11,12 +11,14 @@ from cuda_dialect_per_dialect_score_and_token_efficiency import (
     DIALECTS,
     OUTPUT_DIR,
     PROBLEMS,
+    draw_box_scatter_group,
+    lighter_color,
     load_point,
     load_run_results,
     run_path,
 )
 from cuda_dialect_summary_normalized_score_and_token_efficiency import normalize_data
-from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
 
 
 def parse_args() -> argparse.Namespace:
@@ -62,8 +64,6 @@ def render_chart(
         figure_color = "#000000"
         axes_color = "#000000"
         grid_color = "#9aa4b2"
-        circle_edge_color = "#000000"
-        diamond_edge_color = "#f3f4f6"
         reference_color = "#f3f4f6"
         missing_color = "#9aa4b2"
     else:
@@ -71,8 +71,6 @@ def render_chart(
         figure_color = "white"
         axes_color = "white"
         grid_color = "#6b7280"
-        circle_edge_color = "white"
-        diamond_edge_color = "#111111"
         reference_color = "#111827"
         missing_color = "#6b7280"
 
@@ -92,9 +90,6 @@ def render_chart(
 
     x = np.arange(len(DIALECTS))
     run_count = normalized_scores.shape[0]
-    run_offsets = (
-        np.linspace(-0.12, 0.12, run_count) if run_count > 1 else np.zeros(1)
-    )
 
     for row, (_, problem) in enumerate(PROBLEMS):
         for col, (metric, observations, centers, ylabel) in enumerate(
@@ -134,41 +129,13 @@ def render_chart(
                         va="bottom",
                     )
                     continue
-                included_values = values[included]
-                low, high = included_values.min(), included_values.max()
-
-                ax.errorbar(
+                draw_box_scatter_group(
+                    ax,
                     index,
+                    values,
                     center,
-                    yerr=[[center - low], [high - center]],
-                    fmt="none",
-                    ecolor=color,
-                    elinewidth=3.0,
-                    capsize=8,
-                    capthick=2.4,
-                    alpha=0.8,
-                    zorder=1,
-                )
-                ax.scatter(
-                    index + run_offsets[included],
-                    included_values,
-                    s=72,
-                    marker="o",
-                    color=color,
-                    edgecolor=circle_edge_color,
-                    linewidth=1.1,
-                    alpha=0.7,
-                    zorder=2,
-                )
-                ax.scatter(
-                    index,
-                    center,
-                    s=125,
-                    marker="D",
-                    color=color,
-                    edgecolor=diamond_edge_color,
-                    linewidth=1.2,
-                    zorder=3,
+                    color,
+                    0.52,
                 )
 
             ax.axhline(
@@ -196,15 +163,9 @@ def render_chart(
         fontweight="bold",
     )
     legend_handles = [
-        Line2D(
-            [0],
-            [0],
-            marker="D",
-            linestyle="-",
-            linewidth=3,
-            markersize=9,
-            color=DIALECT_COLORS[dialect],
-            markeredgecolor=diamond_edge_color,
+        Patch(
+            facecolor=lighter_color(DIALECT_COLORS[dialect], 0.55),
+            edgecolor=DIALECT_COLORS[dialect],
             label=dialect,
         )
         for dialect in DIALECTS
@@ -215,9 +176,11 @@ def render_chart(
         ncols=len(DIALECTS),
         frameon=False,
         title=(
-            "Circles: unflagged runs   ·   Diamond: normalized unflagged mean "
-            "score / combined token efficiency   ·   Bar: unflagged range   ·   "
-            "N/A: all runs reward-hacked   ·   Dashed line: CUDA C++ baseline"
+            "Dots: normalized unflagged runs · Box: interquartile range · "
+            "Center line: median · Whiskers: minimum–maximum\n"
+            "Black diamond: normalized unflagged mean score / combined token "
+            "efficiency · N/A: all runs reward-hacked · "
+            "Dashed line: CUDA C++ baseline"
         ),
         title_fontsize=11,
         fontsize=11,

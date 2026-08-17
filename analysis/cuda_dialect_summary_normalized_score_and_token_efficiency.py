@@ -11,7 +11,8 @@ from cuda_dialect_summary_score_and_token_efficiency import (
     MODEL_DISPLAY_NAMES,
     OUTPUT_DIR,
     aggregate_data,
-    draw_bars,
+    dialect_legend_handles,
+    draw_distributions,
     load_data,
     run_path,
 )
@@ -107,7 +108,7 @@ def render_chart(
     for ax in axes:
         ax.set_facecolor(axes_color)
 
-    draw_bars(
+    draw_distributions(
         axes[0],
         normalized_scores,
         normalized_mean_scores,
@@ -115,7 +116,7 @@ def render_chart(
         "KernelBench-Hard normalized score by problem",
         missing_color,
     )
-    draw_bars(
+    draw_distributions(
         axes[1],
         normalized_efficiency,
         normalized_combined_efficiency,
@@ -136,18 +137,16 @@ def render_chart(
     axes[0].set_xlabel("Problem", labelpad=5)
     axes[1].set_xlabel("Problem")
 
-    handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(
-        handles,
-        labels,
+        handles=dialect_legend_handles(),
         loc="lower center",
         ncols=len(DIALECTS),
         frameon=False,
         title=(
-            "Base stack: normalized unflagged minimum · Lighter stack: range to "
-            "maximum · Line: normalized mean score / combined token efficiency · "
-            "N/A: all runs reward-hacked · "
-            "Dashed line: CUDA C++ baseline"
+            "Dots: normalized unflagged runs · Box: interquartile range · "
+            "Center line: median · Whiskers: minimum–maximum\n"
+            "Black diamond: normalized mean score / combined token efficiency · "
+            "N/A: all runs reward-hacked · Dashed line: CUDA C++ baseline"
         ),
     )
     fig.suptitle(

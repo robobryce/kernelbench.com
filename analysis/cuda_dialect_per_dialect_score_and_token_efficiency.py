@@ -10,9 +10,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 from cuda_dialect_summary_score_and_token_efficiency import (
     aggregate_data,
+    draw_box_scatter_group,
+    lighter_color,
     load_result,
 )
-from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
 
 DIALECTS = [
     "CUDA C++",
@@ -132,16 +134,12 @@ def render_chart(
         figure_color = "#000000"
         axes_color = "#000000"
         grid_color = "#9aa4b2"
-        circle_edge_color = "#000000"
-        diamond_edge_color = "#f3f4f6"
         missing_color = "#9aa4b2"
     else:
         plt.style.use("default")
         figure_color = "white"
         axes_color = "white"
         grid_color = "#6b7280"
-        circle_edge_color = "white"
-        diamond_edge_color = "#111111"
         missing_color = "#6b7280"
 
     plt.rcParams.update(
@@ -158,11 +156,6 @@ def render_chart(
     for ax in axes.flat:
         ax.set_facecolor(axes_color)
     x = np.arange(len(DIALECTS))
-    run_offsets = (
-        np.linspace(-0.12, 0.12, len(run_results))
-        if len(run_results) > 1
-        else np.zeros(1)
-    )
     excluded_count = 0
 
     for row, (problem_id, problem) in enumerate(PROBLEMS):
@@ -211,43 +204,13 @@ def render_chart(
                         va="bottom",
                     )
                     continue
-                included_values = values[included]
-                low, high = included_values.min(), included_values.max()
-
-                # The bar spans all observed runs. The large diamond is the mean
-                # score or combined efficiency; the circles retain each run.
-                ax.errorbar(
+                draw_box_scatter_group(
+                    ax,
                     index,
+                    values,
                     center,
-                    yerr=[[center - low], [high - center]],
-                    fmt="none",
-                    ecolor=color,
-                    elinewidth=3.0,
-                    capsize=8,
-                    capthick=2.4,
-                    alpha=0.8,
-                    zorder=1,
-                )
-                ax.scatter(
-                    index + run_offsets[included],
-                    included_values,
-                    s=72,
-                    marker="o",
-                    color=color,
-                    edgecolor=circle_edge_color,
-                    linewidth=1.1,
-                    alpha=0.7,
-                    zorder=2,
-                )
-                ax.scatter(
-                    index,
-                    center,
-                    s=125,
-                    marker="D",
-                    color=color,
-                    edgecolor=diamond_edge_color,
-                    linewidth=1.2,
-                    zorder=3,
+                    color,
+                    0.52,
                 )
 
             ax.set_title(f"{problem} — {metric}", fontweight="bold")
@@ -268,15 +231,9 @@ def render_chart(
         fontweight="bold",
     )
     legend_handles = [
-        Line2D(
-            [0],
-            [0],
-            marker="D",
-            linestyle="-",
-            linewidth=3,
-            markersize=9,
-            color=DIALECT_COLORS[dialect],
-            markeredgecolor=diamond_edge_color,
+        Patch(
+            facecolor=lighter_color(DIALECT_COLORS[dialect], 0.55),
+            edgecolor=DIALECT_COLORS[dialect],
             label=dialect,
         )
         for dialect in DIALECTS
@@ -287,8 +244,9 @@ def render_chart(
         ncols=6,
         frameon=False,
         title=(
-            "Circles: unflagged runs   ·   Diamond: unflagged mean score / "
-            "combined token efficiency   ·   Bar: unflagged range   ·   "
+            "Dots: unflagged runs · Box: interquartile range · Center line: "
+            "median · Whiskers: minimum–maximum\n"
+            "Black diamond: unflagged mean score / combined token efficiency · "
             "N/A: all runs reward-hacked"
         ),
         title_fontsize=11,
