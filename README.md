@@ -39,6 +39,7 @@ Site data is baked at build time from `benchmarks/*/results/`
 ## Docs map
 
 - `AGENTS.md` — sweeps, harnesses, Lambda/Brev, publish, audits
+- `docs/REWARD_HACKING_REPORTS.md` — create, validate, and store audit reports
 - `benchmarks/<bench>/SPEC.md` — methodology
 - `benchmarks/<bench>/DEVLOG.md` — design history
 - `benchmarks/<bench>/README.md` — short human entry for that deck
