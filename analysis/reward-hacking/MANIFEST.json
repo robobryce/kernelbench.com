@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "report_name": "kernelbench-all-report-reward-hacking",
+  "audit_cutoff_date": "2026-08-07",
+  "source_snapshot": {
+    "markdown": {
+      "filename": "kernelbench-all-report-reward-hacking.md",
+      "bytes": 24884,
+      "sha256": "39d04406114d34000a51d8a936299c7f59788305066398da06915f7bf32f3689"
+    },
+    "html": {
+      "filename": "kernelbench-all-report-reward-hacking.html",
+      "bytes": 32377,
+      "sha256": "1cc1dc490698aa8e1a53b09fd5a3c369ff9d388c40fbf4fee904612a5ebc62bc"
+    }
+  },
+  "published_snapshot": {
+    "markdown": {
+      "filename": "kernelbench-all-report-reward-hacking.md",
+      "bytes": 24566,
+      "sha256": "cecf5e0c5e053cdfd835c7567fa8c4039343ea4a74b78c5c4450ae7e5662667e"
+    },
+    "html": {
+      "filename": "kernelbench-all-report-reward-hacking.html",
+      "bytes": 32087,
+      "sha256": "a86baef6473419f6c1a6055800e03f536eeca08a55582da1268b2b830d41f982"
+    }
+  },
+  "publication_normalization": [
+    "Replaced machine-local evidence hyperlinks with non-clickable BREVAL_RUNS-relative path-and-line citations.",
+    "Made the unfinished-wave statement explicitly describe state at the audit cutoff.",
+    "Added a note defining the BREVAL_RUNS evidence root."
+  ],
+  "tools": {
+    "autocuda": "0.5.0",
+    "pandoc": "2.9.2.1"
+  },
+  "validation": {
+    "command": "autocuda schema check report-reward-hacking-markdown --data-dir analysis/reward-hacking --output kernelbench-all",
+    "result": "passed"
+  },
+  "corpus": {
+    "completed_export_paths": 120,
+    "distinct_run_ids": 90,
+    "findings": 28,
+    "finding_run_ids": 24
+  }
+}
