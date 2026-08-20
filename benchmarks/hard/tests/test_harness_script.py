@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -444,3 +445,93 @@ def test_agent_container_sessions_parallel_with_per_command_lock() -> None:
     # The lock lives in a dedicated dir so only the lock is mounted, never
     # the rest of outputs/.
     assert "outputs/gpu_lock" in script
+
+
+def test_codex_agent_and_final_grading_share_immutable_environment_path() -> None:
+    script = RUN_HARD.read_text()
+    codex = script[script.index("    codex)"):script.index("    kimi)")]
+    replay = script[script.index("run_replay_stage()"):script.index("if [ \"$TEMPLATE_MUTATED\"")]
+
+    assert '"$HOST_AGENT_ISOLATOR" "$REAL_TIMEOUT" "$BUDGET_SECONDS"' in codex
+    assert 'CODEX_HOME="$HOST_CODEX_HOME" codex exec' in codex
+    assert "codex sandbox" in codex
+    assert "sandbox_workspace_write.network_access=false" in codex
+    assert "/usr/bin/getent hosts example.com" in codex
+    assert "/usr/bin/curl -fsS --connect-timeout 1" in codex
+    assert "/usr/bin/python3 -c" in codex
+    assert "--sandbox workspace-write" in codex
+    assert 'approval_policy="never"' in codex
+    assert 'web_search="disabled"' in codex
+    assert 'mcp_servers={}' in codex
+    assert '--add-dir "$RUN_DIR"' in codex
+    assert "--dangerously-bypass-approvals-and-sandbox" not in codex
+    assert '"$HOST_AGENT_ISOLATOR" /usr/bin/env -i' in replay
+    assert "KBH_ISOLATION_NETWORK=off" in replay
+    assert '"$TRUSTED_PYTHON" -I -c "$SUBMISSION_REPLAY_SOURCE"' in replay
+
+
+def test_immutable_environment_seals_dependencies_and_trusted_grader_files() -> None:
+    script = RUN_HARD.read_text()
+    isolate = script[script.index("HOST_AGENT_ISOLATOR="):script.index("# Container-side lock wrappers")]
+
+    assert '/usr/bin/mount --bind "$repo/.venv" "$workspace/.venv"' in isolate
+    assert '/usr/bin/mount -o remount,bind,ro "$workspace/.venv"' in isolate
+    assert 'printf "%s\\n" "$workspace_trusted"' in isolate
+    assert 'for path in "$home" "$repo" "$python_runtime" "$trusted_tools" "$trusted_uv"' in isolate
+    assert 'for path in "$cargo_home" "$rustup_home" "$cuda_oxide" "$cutile_rust"' in isolate
+    assert 'UV_NO_SYNC=1 UV_OFFLINE=1 PIP_NO_INDEX=1' in isolate
+    assert 'CARGO_NET_OFFLINE=true' in isolate
+    assert 'WORKSPACE_TRUSTED_PATHS="$WORKSPACE_ROOT/src' in script
+    for name in ("check.py", "benchmark.py", "reference.py", "problem.yaml", "shapes.py"):
+        assert name in script[script.index("TEMPLATE_FILES="):script.index("is_template()")]
+
+
+def test_immutable_environment_preflights_all_six_cuda_dialects() -> None:
+    script = RUN_HARD.read_text()
+    helper = (ROOT.parents[1] / "scripts" / "lib" / "dialect_preflight.py").read_text()
+    start = script.index("DIALECT_NVCC=")
+    end = script.index("TEMPLATE_MUTATED=false", start)
+    preflight = script[start:end]
+
+    assert '"$nvcc" -std=c++17 -c' in preflight
+    assert '"$cargo" --version' in preflight
+    assert '"$rustc" --version' in preflight
+    assert 'cargo" check --locked --offline --manifest-path "$cuda_oxide/Cargo.toml"' in preflight
+    assert 'cargo" check --locked --offline --manifest-path "$cutile_rust/Cargo.toml"' in preflight
+    assert '"$python" -I "$python_preflight"' in preflight
+    assert "@triton.jit" in helper
+    assert "@ct.kernel()" in helper
+    assert "cute.compile(_cute_scalar_add" in helper
+    assert "torch.testing.assert_close" in helper
+    assert "CUDA C++, CUDA Oxide, CuTe DSL, Triton, cuTile Python, cuTile Rust" in preflight
+
+
+def test_codex_child_command_sandbox_blocks_network() -> None:
+    codex = shutil.which("codex")
+    if codex is None:
+        return
+    probe = """
+if /usr/bin/getent hosts example.com >/dev/null 2>&1; then exit 31; fi
+if /usr/bin/curl -fsS --connect-timeout 1 https://example.com/ >/dev/null 2>&1; then exit 32; fi
+if /usr/bin/python3 -c 'import socket; socket.create_connection(("1.1.1.1", 53), 1)' >/dev/null 2>&1; then exit 33; fi
+"""
+    completed = subprocess.run(
+        [
+            codex,
+            "sandbox",
+            "-c",
+            'sandbox_mode="workspace-write"',
+            "-c",
+            "sandbox_workspace_write.network_access=false",
+            "--",
+            "/bin/sh",
+            "-eu",
+            "-c",
+            probe,
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+    assert completed.returncode == 0, completed.stderr

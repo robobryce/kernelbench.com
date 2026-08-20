@@ -29,14 +29,22 @@ are killed when each stage exits. Direct package downloads and remote repository
 clones therefore fail while the submission is being graded. The manifest digest
 and capture status are stored in `result.json`.
 
-Host-mode agent commands also run in a private mount and process namespace. The
-source repository, canonical grading environment, immutable problem backup,
-trusted helpers, and replay directory are read-only; the global `uv` cache is
-presented through a per-run copy-on-write overlay so its hard-linked package
-bytes cannot poison the grading environment. The agent retains its writable run
-workspace and host network access. This boundary still is not a general host
-sandbox: the agent can read and may write unrelated user files outside the
-protected roots. Container agent mode remains the stronger pre-capture boundary.
+The AAB/Codex process, its agent-visible `check.py`/`benchmark.py` commands, and
+the final check/benchmark replay all enter the same mount/process isolation
+helper. The source repository, home tree, canonical `.venv`, Python runtime,
+trusted helpers, problem templates, `src/`, project metadata, `uv` cache, Rust
+toolchain, CUDA Oxide source, and cuTile Rust source are read-only. Only the
+submission/sidecar area, compiler caches, logs, and per-run agent state remain
+writable. Agent-executed commands and final replay are both offline; final
+replay enforces that policy with a private network namespace while Codex uses
+its OS sandbox. Both use the same dependency and filesystem contract. The Codex inference
+client remains online, but model-generated commands run in Codex's
+`workspace-write` sandbox with command network disabled and approvals set to
+`never`; a preflight proves DNS lookup, `curl`, and a direct Python socket all
+fail before inference starts. The runner fails before launching the agent
+unless the immutable environment already provides CUDA C++, CUDA Oxide,
+CuTe DSL, Triton, cuTile Python, and cuTile Rust; it never installs a missing
+toolchain during a run.
 Mega grading additionally uses private mount, PID, and network namespaces with
 the home tree read-only and only the candidate workspace and compiler caches
 writable. Multi keeps its existing runner and archive format.

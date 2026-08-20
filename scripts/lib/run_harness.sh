@@ -59,6 +59,10 @@ KBH_AGENT_CONTAINER_DROID_BIN="${KBH_AGENT_CONTAINER_DROID_BIN:-$HOME/.local/bin
 KBH_AGENT_CONTAINER_CURSOR_DIR="${KBH_AGENT_CONTAINER_CURSOR_DIR:-$HOME/.local/share/cursor-agent/versions/2026.05.27-fe9a6e2}"
 KBH_AGENT_CONTAINER_GROK_DIR="${KBH_AGENT_CONTAINER_GROK_DIR:-$HOME/.grok}"
 KBH_AGENT_CONTAINER_GEMINI_DIR="${KBH_AGENT_CONTAINER_GEMINI_DIR:-/usr/lib/node_modules/@google/gemini-cli}"
+KBH_CARGO_HOME="${KBH_CARGO_HOME:-$HOME/.cargo}"
+KBH_RUSTUP_HOME="${KBH_RUSTUP_HOME:-$HOME/.rustup}"
+KBH_CUDA_OXIDE_ROOT="${KBH_CUDA_OXIDE_ROOT:-$KBH_CARGO_HOME/cuda-oxide}"
+KBH_CUTILE_RUST_ROOT="${KBH_CUTILE_RUST_ROOT:-$KBH_CARGO_HOME/cutile-rs}"
 
 # The BENCH root (outputs/, problems-*/, src/), pinned by the wrapper.
 REPO_ROOT="${KB_BENCH_DIR:?run via a bench wrapper (benchmarks/<bench>/scripts/run_hard.sh), not directly}"
@@ -223,6 +227,7 @@ cp -p "$REPO_ROOT/uv.lock" "$WORKSPACE_ROOT/uv.lock"
 if [ -e "$REPO_ROOT/.python-version" ]; then
     cp -p "$REPO_ROOT/.python-version" "$WORKSPACE_ROOT/.python-version"
 fi
+mkdir -p "$WORKSPACE_ROOT/.venv"
 
 for t in "${TEMPLATE_FILES[@]}"; do
     if [ -e "$SOURCE_PROBLEM_DIR/$t" ]; then
@@ -258,6 +263,7 @@ TRUSTED_PYTHON="$REPO_ROOT/.venv/bin/python"
 TRUSTED_PYTHON_RUNTIME="$(dirname "$(dirname "$(readlink -f "$TRUSTED_PYTHON")")")"
 SUBMISSION_BUNDLE_TOOL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/submission_bundle.py"
 TRUSTED_TOOLS_DIR="$(dirname "$(dirname "$SUBMISSION_BUNDLE_TOOL")")"
+DIALECT_PREFLIGHT_TOOL="$TRUSTED_TOOLS_DIR/lib/dialect_preflight.py"
 TRUSTED_WORKTREE_ROOTS="$(
     /usr/bin/git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null \
         | /usr/bin/sed -n 's/^worktree //p'
@@ -301,6 +307,10 @@ if [ -n "$REAL_NVIDIA_SMI" ] && ! \
 fi
 if [ ! -f "$SUBMISSION_BUNDLE_TOOL" ]; then
     echo "STOP: submission bundle helper is missing: $SUBMISSION_BUNDLE_TOOL" >&2
+    exit 3
+fi
+if [ ! -f "$DIALECT_PREFLIGHT_TOOL" ]; then
+    echo "STOP: CUDA dialect preflight helper is missing: $DIALECT_PREFLIGHT_TOOL" >&2
     exit 3
 fi
 # Keep the reviewed helper source in the parent shell. A host-mode agent can
@@ -509,8 +519,13 @@ set -euo pipefail
 : "${TRUSTED_PYTHON_RUNTIME:?}" "${TRUSTED_TOOLS_DIR:?}" "${REAL_UV:?}"
 : "${REAL_UNSHARE:?}"
 : "${REAL_SETPRIV:?}" "${UV_CACHE_HOST:?}" "${AGENT_UV_OVERLAY:?}"
+: "${WORKSPACE_ROOT:?}" "${WORKSPACE_TRUSTED_PATHS:?}"
 
-exec "$REAL_UNSHARE" --user --map-root-user --mount --pid --fork \
+network_args=()
+if [ "${KBH_ISOLATION_NETWORK:-on}" = "off" ]; then
+    network_args=(--net)
+fi
+exec "$REAL_UNSHARE" --user --map-root-user "${network_args[@]}" --mount --pid --fork \
     --kill-child=KILL --mount-proc --propagation private -- /bin/sh -eu -c '
         repo=$1
         run_dir=$2
@@ -531,11 +546,24 @@ exec "$REAL_UNSHARE" --user --map-root-user --mount --pid --fork \
         agent_cwd=${17}
         transcript=${18}
         stderr_log=${19}
-        shift 19
+        home=${20}
+        workspace=${21}
+        workspace_trusted=${22}
+        cargo_home=${23}
+        rustup_home=${24}
+        cuda_oxide=${25}
+        cutile_rust=${26}
+        shift 26
 
-        for path in "$repo" "$python_runtime" "$trusted_tools" "$trusted_uv"; do
+        for path in "$home" "$repo" "$python_runtime" "$trusted_tools" "$trusted_uv"; do
             /usr/bin/mount --bind "$path" "$path"
             /usr/bin/mount -o remount,bind,ro "$path"
+        done
+        for path in "$cargo_home" "$rustup_home" "$cuda_oxide" "$cutile_rust"; do
+            if [ -e "$path" ]; then
+                /usr/bin/mount --bind "$path" "$path"
+                /usr/bin/mount -o remount,bind,ro "$path"
+            fi
         done
         printf "%s\n" "$trusted_worktrees" | while IFS= read -r path; do
             if [ -n "$path" ] && [ -d "$path" ]; then
@@ -548,6 +576,14 @@ exec "$REAL_UNSHARE" --user --map-root-user --mount --pid --fork \
         # seal every trusted child and expose only the existing lock/log files.
         /usr/bin/mount --bind "$run_dir" "$run_dir"
         /usr/bin/mount -o remount,bind,rw "$run_dir"
+        /usr/bin/mount --bind "$repo/.venv" "$workspace/.venv"
+        /usr/bin/mount -o remount,bind,ro "$workspace/.venv"
+        printf "%s\n" "$workspace_trusted" | while IFS= read -r path; do
+            if [ -n "$path" ] && [ -e "$path" ]; then
+                /usr/bin/mount --bind "$path" "$path"
+                /usr/bin/mount -o remount,bind,ro "$path"
+            fi
+        done
         for path in "$lock_file" "$lock_log"; do
             /usr/bin/mount --bind "$path" "$path"
             /usr/bin/mount -o remount,bind,rw "$path"
@@ -563,15 +599,17 @@ exec "$REAL_UNSHARE" --user --map-root-user --mount --pid --fork \
             fi
         done
 
-        # uv environments use hardlinks into the global content cache. Give
-        # the agent a copy-on-write cache view so writes cannot poison bytes
-        # already linked into the canonical grading environment.
+        # Cache writes are allowed, but only through a per-run overlay. The
+        # canonical cache remains the immutable lower layer used by grading.
         /usr/bin/mount -t overlay overlay \
             -o "lowerdir=$uv_cache,upperdir=$uv_overlay/upper,workdir=$uv_overlay/work,userxattr" \
             "$uv_overlay/merged"
         /usr/bin/mount --bind "$uv_overlay/merged" "$uv_cache"
 
         cd "$agent_cwd"
+        export UV_NO_SYNC=1 UV_OFFLINE=1 PIP_NO_INDEX=1 \
+            CARGO_NET_OFFLINE=true CARGO_HOME="$cargo_home" RUSTUP_HOME="$rustup_home" \
+            KBH_CUDA_OXIDE_ROOT="$cuda_oxide" KBH_CUTILE_RUST_ROOT="$cutile_rust"
         exec "$setpriv" --no-new-privs --bounding-set=-all \
             --inh-caps=-all --ambient-caps=-all "$@"
     ' host-agent-isolate "$REPO_ROOT" "$RUN_DIR" "$KBH_GPU_LOCK" \
@@ -580,7 +618,9 @@ exec "$REAL_UNSHARE" --user --map-root-user --mount --pid --fork \
     "$TRUSTED_PYTHON_RUNTIME" "$TRUSTED_TOOLS_DIR" "$REAL_UV" \
     "$TRUSTED_WORKTREE_ROOTS" "$REAL_SETPRIV" \
     "$UV_CACHE_HOST" "$AGENT_UV_OVERLAY" "$PWD" \
-    "${LOG_FILE:-}" "${STDERR_FILE:-}" "$@"
+    "${LOG_FILE:-}" "${STDERR_FILE:-}" "${KBH_ISOLATION_HOME:-$HOME}" "$WORKSPACE_ROOT" \
+    "$WORKSPACE_TRUSTED_PATHS" "$KBH_CARGO_HOME" "$KBH_RUSTUP_HOME" \
+    "$KBH_CUDA_OXIDE_ROOT" "$KBH_CUTILE_RUST_ROOT" "$@"
 EOF
 chmod +x "$LOCK_WRAPPER_DIR"/uv "$LOCK_WRAPPER_DIR"/python \
     "$LOCK_WRAPPER_DIR"/python3 "$LOCK_WRAPPER_DIR"/nvidia-smi \
@@ -1004,6 +1044,17 @@ model_reasoning_effort = "low"
 trust_level = "trusted"
 EOF
     printf '%s\n' "$home_dir"
+}
+
+prepare_codex_host_home() {
+    local codex_home="$RUN_DIR/agent_home/.codex"
+    mkdir -p "$codex_home"
+    for file in auth.json config.toml; do
+        if [ -f "$HOME/.codex/$file" ]; then
+            cp -p "$HOME/.codex/$file" "$codex_home/$file"
+        fi
+    done
+    printf '%s\n' "$codex_home"
 }
 
 prepare_opencode_container_home() {
@@ -1589,6 +1640,20 @@ TEMPLATE_BACKUP_DIGEST="$(trusted_src_digest "$TEMPLATE_BACKUP_DIR")" || {
 UV_CACHE_HOST="${UV_CACHE_DIR:-$HOME/.cache/uv}"
 AGENT_UV_OVERLAY="$RUN_DIR/agent_uv_overlay"
 HARNESS_CONTROL_DIR="$RUN_DIR/harness_control"
+WORKSPACE_TRUSTED_PATHS="$WORKSPACE_ROOT/src
+$WORKSPACE_ROOT/pyproject.toml
+$WORKSPACE_ROOT/uv.lock
+$WORKSPACE_ROOT/.venv"
+if [ -e "$WORKSPACE_ROOT/.python-version" ]; then
+    WORKSPACE_TRUSTED_PATHS="$WORKSPACE_TRUSTED_PATHS
+$WORKSPACE_ROOT/.python-version"
+fi
+for trusted_template in "${TEMPLATE_FILES[@]}"; do
+    if [ -e "$PROBLEM_DIR/$trusted_template" ]; then
+        WORKSPACE_TRUSTED_PATHS="$WORKSPACE_TRUSTED_PATHS
+$PROBLEM_DIR/$trusted_template"
+    fi
+done
 mkdir -p "$UV_CACHE_HOST" "$AGENT_UV_OVERLAY/upper" \
     "$AGENT_UV_OVERLAY/work" "$AGENT_UV_OVERLAY/merged" \
     "$HARNESS_CONTROL_DIR"
@@ -1596,7 +1661,8 @@ export REPO_ROOT RUN_DIR KBH_GPU_LOCK_DIR TEMPLATE_BACKUP_DIR \
     TRUSTED_SRC_BACKUP_DIR LOCK_WRAPPER_DIR REPLAY_ROOT REAL_UNSHARE \
     REAL_SETPRIV UV_CACHE_HOST AGENT_UV_OVERLAY HARNESS_CONTROL_DIR \
     TRUSTED_PYTHON_RUNTIME TRUSTED_TOOLS_DIR KBH_GPU_LOCK KBH_GPU_LOCK_LOG \
-    REAL_UV TRUSTED_WORKTREE_ROOTS
+    REAL_UV TRUSTED_WORKTREE_ROOTS WORKSPACE_ROOT WORKSPACE_TRUSTED_PATHS \
+    KBH_CARGO_HOME KBH_RUSTUP_HOME KBH_CUDA_OXIDE_ROOT KBH_CUTILE_RUST_ROOT
 
 trusted_path_manifest() {
     {
@@ -1631,6 +1697,45 @@ if [ "$KBH_AGENT_CONTAINER" = "0" ]; then
     ' host-agent-preflight "$REPO_ROOT" "$RUN_ID" "$WORKSPACE_ROOT" \
         "$TRUSTED_PYTHON" "$REPO_ROOT/.venv"; then
         echo "STOP: host-agent trust-boundary preflight failed." >&2
+        exit 3
+    fi
+
+    DIALECT_NVCC="$REAL_NVCC"
+    if [ -z "$DIALECT_NVCC" ] && [ -x "$REPO_ROOT/.venv/bin/nvcc" ]; then
+        DIALECT_NVCC="$REPO_ROOT/.venv/bin/nvcc"
+    fi
+    DIALECT_PREFLIGHT_CU="$RUN_DIR/tmp/dialect_preflight.cu"
+    cat > "$DIALECT_PREFLIGHT_CU" <<'CUDA'
+extern "C" __global__ void immutable_environment_preflight(float* value) {
+    if (threadIdx.x == 0) value[0] += 1.0f;
+}
+CUDA
+    if ! "$HOST_AGENT_ISOLATOR" /bin/sh -eu -c '
+        python=$1
+        nvcc=$2
+        cargo=$3
+        rustc=$4
+        cuda_oxide=$5
+        cutile_rust=$6
+        python_preflight=$7
+        cuda_source=$8
+        cache_root=$9
+        [ -n "$nvcc" ]
+        "$nvcc" -std=c++17 -c "$cuda_source" -o "$cache_root/cuda-cpp.o"
+        [ -x "$cargo" ] && "$cargo" --version >/dev/null
+        [ -x "$rustc" ] && "$rustc" --version >/dev/null
+        [ -f "$cuda_oxide/Cargo.toml" ] && [ -f "$cuda_oxide/Cargo.lock" ]
+        [ -f "$cutile_rust/Cargo.toml" ] && [ -f "$cutile_rust/Cargo.lock" ]
+        CARGO_TARGET_DIR="$cache_root/cuda-oxide" \
+            "$cargo" check --locked --offline --manifest-path "$cuda_oxide/Cargo.toml"
+        CARGO_TARGET_DIR="$cache_root/cutile-rust" \
+            "$cargo" check --locked --offline --manifest-path "$cutile_rust/Cargo.toml"
+        "$python" -I "$python_preflight"
+    ' dialect-preflight "$TRUSTED_PYTHON" "$DIALECT_NVCC" \
+        "$KBH_CARGO_HOME/bin/cargo" "$KBH_CARGO_HOME/bin/rustc" \
+        "$KBH_CUDA_OXIDE_ROOT" "$KBH_CUTILE_RUST_ROOT" \
+        "$DIALECT_PREFLIGHT_TOOL" "$DIALECT_PREFLIGHT_CU" "$RUN_DIR/cache"; then
+        echo "STOP: immutable grading environment is missing one or more CUDA dialect toolchains (CUDA C++, CUDA Oxide, CuTe DSL, Triton, cuTile Python, cuTile Rust)." >&2
         exit 3
     fi
 fi
@@ -2671,10 +2776,29 @@ case "$HARNESS" in
             run_codex_container "$REASONING_EFFORT" \
                 > "$LOG_FILE" 2> "$STDERR_FILE" || HARNESS_EXIT=$?
         else
-            timeout "$BUDGET_SECONDS" codex exec \
+            HOST_CODEX_HOME="$(prepare_codex_host_home)"
+            if ! "$HOST_AGENT_ISOLATOR" /usr/bin/env CODEX_HOME="$HOST_CODEX_HOME" \
+                codex sandbox \
+                -c 'sandbox_mode="workspace-write"' \
+                -c 'sandbox_workspace_write.network_access=false' -- \
+                /bin/sh -eu -c '
+                    if /usr/bin/getent hosts example.com >/dev/null 2>&1; then exit 31; fi
+                    if /usr/bin/curl -fsS --connect-timeout 1 https://example.com/ >/dev/null 2>&1; then exit 32; fi
+                    if /usr/bin/python3 -c '\''import socket; socket.create_connection(("1.1.1.1", 53), 1)'\'' >/dev/null 2>&1; then exit 33; fi
+                '; then
+                echo "STOP: Codex child-command sandbox does not enforce the grading network policy." >&2
+                exit 3
+            fi
+            "$HOST_AGENT_ISOLATOR" "$REAL_TIMEOUT" "$BUDGET_SECONDS" \
+                /usr/bin/env CODEX_HOME="$HOST_CODEX_HOME" codex exec \
                 -m "$MODEL" \
                 "${EFFORT_ARG[@]}" \
-                --dangerously-bypass-approvals-and-sandbox \
+                --sandbox workspace-write \
+                -c 'approval_policy="never"' \
+                -c 'sandbox_workspace_write.network_access=false' \
+                -c 'web_search="disabled"' \
+                -c 'mcp_servers={}' \
+                --add-dir "$RUN_DIR" \
                 --skip-git-repo-check \
                 -C "$PROBLEM_DIR" \
                 "$PROMPT" \
@@ -2690,7 +2814,7 @@ case "$HARNESS" in
             if [ "$KBH_AGENT_CONTAINER" = "1" ]; then
                 CODEX_SEARCH_ROOT="$RUN_DIR/agent_home/.codex/sessions"
             else
-                CODEX_SEARCH_ROOT="$HOME/.codex/sessions"
+                CODEX_SEARCH_ROOT="$HOST_CODEX_HOME/sessions"
             fi
             CODEX_SESS=$(find "$CODEX_SEARCH_ROOT" -name "*${CODEX_SID}*.jsonl" 2>/dev/null | head -1)
             if [ -n "$CODEX_SESS" ]; then
@@ -3058,7 +3182,7 @@ prepare_replay_stage() {
     fi
     restore_trusted_src || return
     mkdir -m 700 "$stage_dir" || return
-    mkdir -p "$stage_root/problems" "$stage_dir/home" "$stage_dir/tmp" \
+    mkdir -p "$stage_root/problems" "$stage_root/.venv" "$stage_dir/home" "$stage_dir/tmp" \
         "$stage_dir/cache/torch_extensions" "$stage_dir/cache/triton" \
         "$stage_dir/cache/cuda" "$stage_dir/cache/xdg" || return
     cp -a -- "$WORKSPACE_ROOT/src" "$stage_root/src" || return
@@ -3130,38 +3254,28 @@ run_replay_stage() {
             replay_env+=("$name=${!name}")
         fi
     done
+    local stage_root="$stage_dir/repo"
+    local replay_trusted_paths="$stage_root/src
+$stage_root/pyproject.toml
+$stage_root/uv.lock
+$stage_root/.venv"
+    if [ -e "$stage_root/.python-version" ]; then
+        replay_trusted_paths="$replay_trusted_paths
+$stage_root/.python-version"
+    fi
+    local item
+    for item in "${TEMPLATE_FILES[@]}"; do
+        if [ -e "$stage_problem/$item" ]; then
+            replay_trusted_paths="$replay_trusted_paths
+$stage_problem/$item"
+        fi
+    done
     local -a replay_command=(
-        "$REAL_UNSHARE" --user --map-root-user --net --mount --pid --fork
-        --kill-child=KILL --mount-proc --propagation private -- /bin/sh -eu -c '
-            readonly_root=$1
-            python_runtime=$2
-            trusted_tools=$3
-            writable_stage=$4
-            setpriv=$5
-            trusted_worktrees=$6
-            uv_cache=$7
-            shift 7
-            for path in "$readonly_root" "$python_runtime" "$trusted_tools"; do
-                /usr/bin/mount --bind "$path" "$path"
-                /usr/bin/mount -o remount,bind,ro "$path"
-            done
-            printf "%s\n" "$trusted_worktrees" | while IFS= read -r path; do
-                if [ -n "$path" ] && [ -d "$path" ]; then
-                    /usr/bin/mount --bind "$path" "$path"
-                    /usr/bin/mount -o remount,bind,ro "$path"
-                fi
-            done
-            /usr/bin/mount --bind "$uv_cache" "$uv_cache"
-            /usr/bin/mount -o remount,bind,ro "$uv_cache"
-            /usr/bin/mount --bind "$writable_stage" "$writable_stage"
-            /usr/bin/mount -o remount,bind,rw "$writable_stage"
-            exec "$setpriv" --no-new-privs --bounding-set=-all \
-                --inh-caps=-all --ambient-caps=-all "$@"
-        ' replay-isolate "$REPO_ROOT" "$TRUSTED_PYTHON_RUNTIME" \
-        "$TRUSTED_TOOLS_DIR" "$stage_dir" "$REAL_SETPRIV"
-        "$TRUSTED_WORKTREE_ROOTS" "$UV_CACHE_HOST"
-        /usr/bin/env -i "${replay_env[@]}" "$TRUSTED_PYTHON" -I \
-        -c "$SUBMISSION_REPLAY_SOURCE" "$trusted_entrypoint" "$script"
+        /usr/bin/env KBH_ISOLATION_NETWORK=off KBH_ISOLATION_HOME="$stage_dir/home"
+        WORKSPACE_ROOT="$stage_root" WORKSPACE_TRUSTED_PATHS="$replay_trusted_paths"
+        "$HOST_AGENT_ISOLATOR" /usr/bin/env -i "${replay_env[@]}"
+        "$TRUSTED_PYTHON" -I -c "$SUBMISSION_REPLAY_SOURCE"
+        "$trusted_entrypoint" "$script"
     )
     (
         cd "$stage_problem"

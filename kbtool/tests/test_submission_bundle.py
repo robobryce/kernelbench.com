@@ -522,12 +522,12 @@ def test_shared_runner_clears_environment_and_unshares_user_and_network() -> Non
     end = text.index('\n}\n\nif [ "$TEMPLATE_MUTATED"', start)
     runtime = text[start:end]
     collapsed = " ".join(runtime.replace("\\\n", " ").split())
-    assert '"$REAL_UNSHARE" --user --map-root-user --net --mount' in collapsed
-    assert '/usr/bin/env -i "${replay_env[@]}" "$TRUSTED_PYTHON" -I -c' in collapsed
+    assert "KBH_ISOLATION_NETWORK=off" in collapsed
+    assert '"$HOST_AGENT_ISOLATOR" /usr/bin/env -i "${replay_env[@]}"' in collapsed
     assert '"$trusted_entrypoint" "$script"' in collapsed
     assert '"$TRUSTED_PYTHON" -I -S' not in runtime
-    assert 'mount -o remount,bind,ro "$path"' in runtime
-    assert 'mount -o remount,bind,rw "$writable_stage"' in runtime
+    assert 'WORKSPACE_ROOT="$stage_root"' in runtime
+    assert 'WORKSPACE_TRUSTED_PATHS="$replay_trusted_paths"' in runtime
     assert 'run_gpu_locked_timeout check.py' in runtime
 
     preflight = text.index("replay-preflight")
@@ -540,11 +540,14 @@ def test_host_agents_cannot_mutate_grading_roots_or_uv_cache_links() -> None:
     end = text.index("\nEOF\nchmod", start)
     isolator = text[start:end]
     assert (
-        'for path in "$repo" "$python_runtime" "$trusted_tools" "$trusted_uv"'
+        'for path in "$home" "$repo" "$python_runtime" "$trusted_tools" "$trusted_uv"'
         in isolator
     )
     assert '/usr/bin/mount -o remount,bind,ro "$path"' in isolator
-    assert '"$repo" "$python_runtime" "$trusted_tools" "$trusted_uv"' in isolator
+    assert '"$home" "$repo" "$python_runtime" "$trusted_tools" "$trusted_uv"' in isolator
+    assert '/usr/bin/mount --bind "$repo/.venv" "$workspace/.venv"' in isolator
+    assert 'printf "%s\\n" "$workspace_trusted"' in isolator
+    assert 'for path in "$cargo_home" "$rustup_home" "$cuda_oxide" "$cutile_rust"' in isolator
     assert 'printf "%s\\n" "$trusted_worktrees"' in isolator
     assert '"$template_backup" "$trusted_src" "$wrapper_dir" "$replay_root"' in isolator
     assert "/usr/bin/mount -t overlay overlay" in isolator
@@ -562,8 +565,8 @@ def test_untrusted_grading_process_cannot_inherit_gpu_lock_descriptors() -> None
     text = (REPO / "scripts/lib/run_harness.sh").read_text()
     assert '"$real" "$@" 3>&- 9>&-' in text
     replay = text[text.index("run_replay_stage()") :]
-    assert '"$TRUSTED_WORKTREE_ROOTS" "$UV_CACHE_HOST"' in replay
-    assert '/usr/bin/mount -o remount,bind,ro "$uv_cache"' in replay
+    assert '"$HOST_AGENT_ISOLATOR" /usr/bin/env -i' in replay
+    assert "run_gpu_locked_timeout check.py" in replay
 
 
 def test_host_agent_isolator_enforces_read_only_and_copy_on_write_mounts(
@@ -596,6 +599,8 @@ def test_host_agent_isolator_enforces_read_only_and_copy_on_write_mounts(
     overlay = run / "agent_uv_overlay"
     for path in (
         workspace,
+        workspace / ".venv",
+        repo / ".venv",
         template_backup,
         trusted_src,
         wrappers,
@@ -645,6 +650,12 @@ printf 'workspace\\n' > "$4/wrote"
         "REAL_SETPRIV": setpriv,
         "UV_CACHE_HOST": str(cache),
         "AGENT_UV_OVERLAY": str(overlay),
+        "WORKSPACE_ROOT": str(workspace),
+        "WORKSPACE_TRUSTED_PATHS": str(workspace / ".venv"),
+        "KBH_CARGO_HOME": str(tmp_path / "cargo"),
+        "KBH_RUSTUP_HOME": str(tmp_path / "rustup"),
+        "KBH_CUDA_OXIDE_ROOT": str(tmp_path / "cuda-oxide"),
+        "KBH_CUTILE_RUST_ROOT": str(tmp_path / "cutile-rust"),
     }
     try:
         completed = subprocess.run(
