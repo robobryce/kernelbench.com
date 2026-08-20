@@ -549,7 +549,8 @@ def test_host_agents_cannot_mutate_grading_roots_or_uv_cache_links() -> None:
     assert 'printf "%s\\n" "$workspace_trusted"' in isolator
     assert 'for path in "$cargo_home" "$rustup_home" "$cuda_oxide" "$cutile_rust"' in isolator
     assert 'printf "%s\\n" "$trusted_worktrees"' in isolator
-    assert '"$template_backup" "$trusted_src" "$wrapper_dir" "$replay_root"' in isolator
+    assert '"$template_backup" "$trusted_src" "$wrapper_dir" "$control_dir"' in isolator
+    assert '"$replay_root"/*' in isolator
     assert "/usr/bin/mount -t overlay overlay" in isolator
     assert "lowerdir=$uv_cache,upperdir=$uv_overlay/upper" in isolator
     assert 'cd "$agent_cwd"' in isolator
@@ -656,6 +657,7 @@ printf 'workspace\\n' > "$4/wrote"
         "KBH_RUSTUP_HOME": str(tmp_path / "rustup"),
         "KBH_CUDA_OXIDE_ROOT": str(tmp_path / "cuda-oxide"),
         "KBH_CUTILE_RUST_ROOT": str(tmp_path / "cutile-rust"),
+        "DIALECT_CUDA_TOOLKIT": str(runtime),
     }
     try:
         completed = subprocess.run(

@@ -14,6 +14,9 @@ dependencies = [
     "ruff>=0.6",
     "einops>=0.8.2",
     "requests<2.33",
+    "triton==3.6.0",
+    "nvidia-cutlass-dsl==4.7.0",
+    "cuda-tile==1.5.0",
 ]
 
 [build-system]

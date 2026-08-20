@@ -45,6 +45,20 @@ fail before inference starts. The runner fails before launching the agent
 unless the immutable environment already provides CUDA C++, CUDA Oxide,
 CuTe DSL, Triton, cuTile Python, and cuTile Rust; it never installs a missing
 toolchain during a run.
+
+The canonical worker setup commands, `scripts/brev_worker.sh bootstrap` and
+`scripts/lambda_worker.sh bootstrap`, provision that environment
+deterministically. They install Triton 3.6.0, CUTLASS/CuTe DSL 4.7.0, and
+cuTile Python 1.5.0 from the committed Python locks; CUDA Oxide commit
+`6c5458fe991bbde32c5bee74d87822aef1b5a691` with Rust
+`nightly-2026-04-03`; and cuTile Rust commit
+`a3ed99d225befcb19f75ec8d81708eb35818fee2` with Rust 1.89.0 and CUDA Tile
+submodule `0859212ad19f71133a9b940c05323286cbf28a05`. The complete CUDA 13.3.1
+toolkit lives outside the Python environment in a versioned Cargo-home path.
+Bootstrap performs locked Cargo checks, while each run compiles a CUDA source,
+checks the pinned revisions offline, validates the Python imports, and runs the
+existing GPU preflight before agent inference.
+
 Mega grading additionally uses private mount, PID, and network namespaces with
 the home tree read-only and only the candidate workspace and compiler caches
 writable. Multi keeps its existing runner and archive format.

@@ -494,16 +494,52 @@ def test_immutable_environment_preflights_all_six_cuda_dialects() -> None:
     preflight = script[start:end]
 
     assert '"$nvcc" -std=c++17 -c' in preflight
-    assert '"$cargo" --version' in preflight
-    assert '"$rustc" --version' in preflight
-    assert 'cargo" check --locked --offline --manifest-path "$cuda_oxide/Cargo.toml"' in preflight
-    assert 'cargo" check --locked --offline --manifest-path "$cutile_rust/Cargo.toml"' in preflight
+    assert '"$cargo" "+$cuda_oxide_toolchain" --version' in preflight
+    assert '"$rustc" "+$cutile_rust_toolchain" --version' in preflight
+    assert '"+$cuda_oxide_toolchain" check --locked --offline' in preflight
+    assert '"+$cutile_rust_toolchain" check --locked --offline' in preflight
+    assert "6c5458fe991bbde32c5bee74d87822aef1b5a691" in script
+    assert "a3ed99d225befcb19f75ec8d81708eb35818fee2" in script
+    assert "0859212ad19f71133a9b940c05323286cbf28a05" in script
     assert '"$python" -I "$python_preflight"' in preflight
     assert "@triton.jit" in helper
     assert "@ct.kernel()" in helper
     assert "cute.compile(_cute_scalar_add" in helper
     assert "torch.testing.assert_close" in helper
     assert "CUDA C++, CUDA Oxide, CuTe DSL, Triton, cuTile Python, cuTile Rust" in preflight
+
+
+def test_worker_bootstrap_pins_and_provisions_all_cuda_dialects() -> None:
+    bootstrap = (ROOT.parents[1] / "scripts" / "lib" / "bootstrap_dialects.sh").read_text()
+    brev = (ROOT.parents[1] / "scripts" / "brev_worker.sh").read_text()
+    lambda_worker = (ROOT.parents[1] / "scripts" / "lambda_worker.sh").read_text()
+
+    for bench in ("hard", "cuda", "mini"):
+        bench_root = ROOT.parents[1] / "benchmarks" / bench
+        project = (bench_root / "pyproject.toml").read_text()
+        lock = (bench_root / "uv.lock").read_text()
+        assert '"cuda-tile==1.5.0"' in project
+        assert '"nvidia-cutlass-dsl==4.7.0"' in project
+        assert 'name = "cuda-tile"\nversion = "1.5.0"' in lock
+        assert 'name = "nvidia-cutlass-dsl"\nversion = "4.7.0"' in lock
+
+    for value in (
+        "6c5458fe991bbde32c5bee74d87822aef1b5a691",
+        "nightly-2026-04-03",
+        "a3ed99d225befcb19f75ec8d81708eb35818fee2",
+        "1.89.0",
+        "0859212ad19f71133a9b940c05323286cbf28a05",
+        'CUDA_TOOLKIT_VERSION="13.3.1"',
+    ):
+        assert value in bootstrap
+    assert 'cargo "+$CUDA_OXIDE_TOOLCHAIN" fetch --locked' in bootstrap
+    assert 'cargo "+$CUDA_OXIDE_TOOLCHAIN" check --locked' in bootstrap
+    assert 'cargo "+$CUTILE_RUST_TOOLCHAIN" fetch --locked' in bootstrap
+    assert 'cargo "+$CUTILE_RUST_TOOLCHAIN" check --locked' in bootstrap
+    assert 'ln -sfn "$cuda_toolkit_root/bin/nvcc"' in bootstrap
+    assert '"cuda-toolkit[all]==$CUDA_TOOLKIT_VERSION"' in bootstrap
+    assert "bash scripts/lib/bootstrap_dialects.sh" in brev
+    assert "bash scripts/lib/bootstrap_dialects.sh" in lambda_worker
 
 
 def test_codex_child_command_sandbox_blocks_network() -> None:

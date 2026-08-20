@@ -17,9 +17,7 @@ dependencies = [
     "requests<2.33",
     "triton==3.6.0",
     "nvidia-cutlass-dsl==4.7.0",
-    "cuda-tile[tileiras]==1.5.0",
-    "cuda-toolkit[cublas,cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvcc,nvjitlink,nvrtc,nvtx,nvvm,tileiras]>=13.3,<13.4",
-    "nvidia-cuda-cccl>=13.3,<13.4",
+    "cuda-tile==1.5.0",
     "apache-tvm-ffi==0.1.13.post2",
 ]
 

@@ -5,7 +5,7 @@
 #
 #   brev_worker.sh up <name> [type]             create instance (default hyperstack_H100) + wait + refresh ssh
 #   brev_worker.sh sync <name>                  rsync thin bench (KB_BREV_BENCH, default hard) -> <name>:kb-<bench>/
-#   brev_worker.sh bootstrap <name> [--agents]  uv + torch (cu128); --agents adds node + agent CLIs + auth
+#   brev_worker.sh bootstrap <name> [--agents]  uv + torch + pinned CUDA dialects; --agents adds agent CLIs + auth
 #   brev_worker.sh run <name> <harness> <model> <problem> [effort]   detached agent session (problems root auto)
 #   brev_worker.sh regrade <name> <run_id> [runs_dir]   re-grade an archived solution.py: check.py then benchmark.py, sequentially
 #   brev_worker.sh pull <name>                  rsync outputs/runs back (thin) into outputs/runs-brev-<name>/
@@ -111,11 +111,16 @@ case "$CMD" in
   bootstrap)
     ensure_reachable
     AGENTS=0; [ "${1:-}" = "--agents" ] && AGENTS=1
-    echo "[bootstrap] uv + torch (agents=$AGENTS)"
+    echo "[bootstrap] uv + torch + pinned CUDA dialects (agents=$AGENTS)"
     "${S[@]}" "$NAME" 'command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh'
     # cu128 torch: stock brev images ship R570-class drivers; the repo cu130
     # pin needs R580. Same override the mega cloud bootstrap uses.
     apply_worker_torch_index
+    case "$BENCH" in
+      hard|cuda|mini)
+        "${S[@]}" "$NAME" "cd ~/$REMOTE_DIR && export PATH=\"\$HOME/.local/bin:\$PATH\" && bash scripts/lib/bootstrap_dialects.sh"
+        ;;
+    esac
     if [ "$AGENTS" = 1 ]; then
       "${S[@]}" "$NAME" 'command -v node >/dev/null 2>&1 || { curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - >/dev/null 2>&1 && sudo apt-get install -y nodejs >/dev/null 2>&1; }
         command -v bwrap >/dev/null 2>&1 || sudo apt-get install -y -qq bubblewrap >/dev/null 2>&1
