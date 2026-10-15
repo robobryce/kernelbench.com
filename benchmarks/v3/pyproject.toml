@@ -16,7 +16,7 @@ dependencies = [
     "anthropic>=0.39.0",
     "archon-ai",
     "cerebras-cloud-sdk>=1.0.0",
-    "datasets==3.6.0",
+    "datasets==5.0.1",
     "einops",
     "google-generativeai>=0.8.3",
     "groq",
